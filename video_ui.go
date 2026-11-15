@@ -117,7 +117,7 @@ func chooseAndExport(ffmpeg string, plans []clipPlan, notRecording bool) {
 	if !ok {
 		return
 	}
-	cfg.VideoFolder, cfg.WholeFrame, cfg.VideoTimer = folder, !opts.Crop, opts.Timer
+	cfg.VideoFolder, cfg.WholeFrame, cfg.VideoTimer, cfg.VideoLogo = folder, !opts.Crop, opts.Timer, opts.Logo
 	saveCfg()
 	startExport(ffmpeg, folder, cfg.TrackName, picked, opts)
 }
@@ -211,7 +211,7 @@ func chooseClips(plans []clipPlan, note string) (picked []clipPlan, opts clipOpt
 
 	var dlg *walk.Dialog
 	var countLbl *walk.Label
-	var cropCB, timerCB *walk.CheckBox
+	var cropCB, timerCB, logoCB *walk.CheckBox
 	var exportPB, cancelPB *walk.PushButton
 	m.changed = func() {
 		countLbl.SetText(countText())
@@ -252,7 +252,14 @@ func chooseClips(plans []clipPlan, note string) (picked []clipPlan, opts clipOpt
 			Composite{
 				Layout: HBox{MarginsZero: true},
 				Children: []Widget{
-					CheckBox{AssignTo: &timerCB, Text: "Timer on the video, to the millisecond: starts with the first lap and stops at the end of the third", Checked: cfg.VideoTimer},
+					CheckBox{AssignTo: &timerCB, Text: "Timer on the video, from the start of the first lap to the end of the third, with each lap's time under it as it is finished", Checked: cfg.VideoTimer},
+					HSpacer{},
+				},
+			},
+			Composite{
+				Layout: HBox{MarginsZero: true},
+				Children: []Widget{
+					CheckBox{AssignTo: &logoCB, Text: "MCS logo in the corner of the video", Checked: cfg.VideoLogo},
 					HSpacer{},
 				},
 			},
@@ -262,7 +269,7 @@ func chooseClips(plans []clipPlan, note string) (picked []clipPlan, opts clipOpt
 				Children: []Widget{
 					HSpacer{},
 					PushButton{AssignTo: &exportPB, Text: "Export...", Enabled: m.ticked() > 0, OnClicked: func() {
-						opts = clipOptions{Crop: cropCB.Checked(), Timer: timerCB.Checked()}
+						opts = clipOptions{Crop: cropCB.Checked(), Timer: timerCB.Checked(), Logo: logoCB.Checked()}
 						dlg.Accept()
 					}},
 					PushButton{AssignTo: &cancelPB, Text: "Cancel", OnClicked: func() { dlg.Cancel() }},
@@ -295,8 +302,9 @@ func startExport(ffmpeg, folder, track string, clips []clipPlan, opts clipOption
 	logf("Video: cutting %d clips into %s", total, folder)
 
 	made, failed := 0, 0 // counted on the UI thread
+	logo := videoLogo()
 	go func() {
-		setupErr := exportClips(ctx, ffmpeg, folder, track, clips, opts, func(i int, name string, err error) {
+		setupErr := exportClips(ctx, ffmpeg, folder, track, clips, opts, logo, func(i int, name string, err error) {
 			mw.Synchronize(func() {
 				if err != nil {
 					failed++

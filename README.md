@@ -54,8 +54,15 @@ Files are named `MCS - <track> - <pilot> - <time>.mp4`.
 - By default a timer is drawn at the top right of the video. It shows 0 until
   the first lap starts, counts to the millisecond through the three laps, and
   stops on the pilot's 3-lap time: `24.617`, or `1:24.617` for a minute or
-  more. Untick "Timer on the video" to leave it off. Both choices are
-  remembered.
+  more. Under it, a little smaller, each lap's time is added as the lap is
+  finished (`L1 13.613`) and stays to the end. Untick "Timer on the video" to
+  leave both off.
+- By default the MCS logo is put in the bottom right corner as a watermark,
+  a quarter of the picture's width and slightly see-through. Untick "MCS logo
+  in the corner of the video" to leave it off. The logo is built into the
+  program; to use another, put a `logo.png` with a see-through background
+  beside `MCS-Uploader.exe`.
+- All three choices are remembered.
 - FPVTrackside only records a video source that has **Record Video For
   Replays** turned on in its video settings, and it only keeps so many videos
   (**Videos To Keep**), deleting the oldest. If nothing can be exported the

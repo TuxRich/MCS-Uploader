@@ -34,11 +34,12 @@ type settings struct {
 	VideoFolder  string              `json:"video_folder,omitempty"`      // where videos were last exported to
 	WholeFrame   bool                `json:"video_whole_frame,omitempty"` // export the whole recorded picture, not just the pilot's
 	FFmpegPath   string              `json:"ffmpeg_path,omitempty"`       // ffmpeg.exe, if it isn't on the PATH
-	VideoTimer   bool                `json:"video_timer"`                 // draw a timer on exported videos
+	VideoTimer   bool                `json:"video_timer"`                 // draw a timer and lap times on exported videos
+	VideoLogo    bool                `json:"video_logo"`                  // put the MCS logo in the corner of exported videos
 }
 
 func loadSettings(file string) settings {
-	s := settings{FlagLapUnder: defaultLapLimit, VideoTimer: true} // unless the file says otherwise
+	s := settings{FlagLapUnder: defaultLapLimit, VideoTimer: true, VideoLogo: true} // unless the file says otherwise
 	if data, err := os.ReadFile(file); err == nil {
 		_ = json.Unmarshal(data, &s)
 	}

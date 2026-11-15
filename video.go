@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -404,20 +405,57 @@ func cropFilter(r relRect) string {
 // clipOptions are the choices made about how clips are cut.
 type clipOptions struct {
 	Crop  bool // just the pilot's own picture, where the recording says where that is
-	Timer bool // a timer on the picture, running over the three laps
+	Timer bool // a timer on the picture, running over the three laps, and each lap's time under it
+	Logo  bool // the MCS logo in a corner of the picture
 }
 
-// The timer is drawn by ffmpeg from two files it finds in the folder it is
-// run in (see timerFolder), so that no path has to be written into a filter,
-// where colons, quotes and backslashes all mean something.
+// What is put on the picture is drawn by ffmpeg from files it finds in the
+// folder it is run in (see overlayFolder), so that no path has to be written
+// into a filter, where colons, quotes and backslashes all mean something.
 const (
-	timerFontFile = "font.ttf"
-	timerTextFile = "timer.txt"
-	// Top right, where pilots' on-screen displays tend to have nothing; white
-	// on a dark box so it reads over any picture; sized to the picture.
-	timerFilter = "drawtext=fontfile=" + timerFontFile + ":textfile=" + timerTextFile +
-		":fontsize=h/11:fontcolor=white:box=1:boxcolor=black@0.55:boxborderw=6:x=w-text_w-w/30:y=h/30"
+	overlayFontFile = "font.ttf"
+	timerTextFile   = "timer.txt"
+	lapTextFile     = "lap%d.txt" // 1 to 3
+	logoFile        = "logo.png"
+
+	// White on a dark box, so it reads over any picture.
+	textStyle = ":fontcolor=white:box=1:boxcolor=black@0.55"
+	// The timer: top right, where pilots' on-screen displays tend to have
+	// nothing, and sized to the picture.
+	timerFilter = "drawtext=fontfile=" + overlayFontFile + ":textfile=" + timerTextFile +
+		":fontsize=h/11" + textStyle + ":boxborderw=6:x=w-text_w-w/30:y=h/30"
+	// A lap's time: under the timer, a little smaller, one line a lap, from
+	// the moment the lap is finished.
+	lapFilter = "drawtext=fontfile=" + overlayFontFile + ":textfile=" + lapTextFile +
+		":fontsize=h/17" + textStyle + ":boxborderw=4:x=w-text_w-w/30:y=h/30+h/11+16+%d*(h/17+10):enable='gte(t,%.3f)'"
+
+	// The logo: bottom right, a quarter of the picture's width, and slightly
+	// see-through.
+	logoShare   = 0.25
+	logoOverlay = "format=rgba,colorchannelmixer=aa=0.85[logo];[pic][logo]overlay=x=W-w-W/40:y=H-h-W/40"
 )
+
+// clock writes a time as the timer shows it: 24.617, or 1:24.617 for a
+// minute or more.
+func clock(seconds float64) string {
+	ms := int64(seconds*1000 + 0.5)
+	if ms < 60000 {
+		return fmt.Sprintf("%d.%03d", ms/1000, ms%1000)
+	}
+	return fmt.Sprintf("%d:%02d.%03d", ms/60000, ms%60000/1000, ms%1000)
+}
+
+// lapLines are the three laps of a plan's run as they are shown under the
+// timer, and when in the clip each is shown from: the moment the lap ends.
+func lapLines(p clipPlan) (text [3]string, from [3]float64) {
+	at := p.LapsAt
+	for i, lap := range []float64{p.Run.Lap1, p.Run.Lap2, p.Run.Lap3} {
+		at += lap
+		text[i] = fmt.Sprintf("L%d %s", i+1, clock(lap))
+		from[i] = at
+	}
+	return text, from
+}
 
 // timerText is what ffmpeg is given to draw as the timer: text that it works
 // out afresh for every frame from the frame's time in the clip, t. The timer
@@ -433,60 +471,133 @@ func timerText(lapsAt, total float64) string {
 	return fmt.Sprintf("%%{eif:floor(%s/60000):d}:%%{eif:floor(mod(%s,60000)/1000):d:2}.%%{eif:mod(%s,1000):d:3}", ms, ms, ms)
 }
 
-// timerFolder makes a folder for ffmpeg to run in when it draws timers, with
-// a font in it. A font whose digits are all one width, so the timer doesn't
-// shake as it counts.
-func timerFolder() (string, error) {
-	fonts := filepath.Join(os.Getenv("WINDIR"), "Fonts")
-	var font []byte
-	for _, name := range []string{"consola.ttf", "lucon.ttf", "cour.ttf", "arial.ttf"} {
-		if data, err := os.ReadFile(filepath.Join(fonts, name)); err == nil {
-			font = data
-			break
-		}
-	}
-	if font == nil {
-		return "", fmt.Errorf("no font for the timer was found in %s", fonts)
-	}
+// overlayFolder makes a folder for ffmpeg to run in when it draws on clips,
+// with what the options need in it: a font for the timer, one whose digits
+// are all one width so the timer doesn't shake as it counts, and the logo.
+func overlayFolder(opts clipOptions, logo []byte) (string, error) {
 	dir, err := os.MkdirTemp("", "mcs-uploader-")
 	if err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(filepath.Join(dir, timerFontFile), font, 0600); err != nil {
+	fail := func(err error) (string, error) {
 		os.RemoveAll(dir)
 		return "", err
+	}
+	if opts.Timer {
+		fonts := filepath.Join(os.Getenv("WINDIR"), "Fonts")
+		var font []byte
+		for _, name := range []string{"consola.ttf", "lucon.ttf", "cour.ttf", "arial.ttf"} {
+			if data, err := os.ReadFile(filepath.Join(fonts, name)); err == nil {
+				font = data
+				break
+			}
+		}
+		if font == nil {
+			return fail(fmt.Errorf("no font for the timer was found in %s", fonts))
+		}
+		if err := os.WriteFile(filepath.Join(dir, overlayFontFile), font, 0600); err != nil {
+			return fail(err)
+		}
+	}
+	if opts.Logo {
+		if len(logo) == 0 {
+			return fail(errors.New("there is no logo to put on the videos"))
+		}
+		if err := os.WriteFile(filepath.Join(dir, logoFile), logo, 0600); err != nil {
+			return fail(err)
+		}
 	}
 	return dir, nil
 }
 
+// evenPixels rounds a length in pixels to the nearest even number, as the
+// crop filter does.
+func evenPixels(x float64) int { return 2 * int(x/2+0.5) }
+
+// logoWidth is how wide the logo is drawn on a plan's clip, given the width
+// of the video the clip is cut from.
+func logoWidth(p clipPlan, opts clipOptions, videoWidth int) int {
+	width := float64(videoWidth)
+	if opts.Crop && p.HasCrop {
+		width = float64(evenPixels((p.Crop.X+p.Crop.W)*width) - evenPixels(p.Crop.X*width))
+	}
+	return max(32, evenPixels(width*logoShare))
+}
+
+var videoSizeRE = regexp.MustCompile(`Video:.*?\b(\d{2,5})x(\d{2,5})\b`)
+
+// parseVideoSize finds a video's width and height in what ffmpeg says about it.
+func parseVideoSize(report string) (width, height int, ok bool) {
+	m := videoSizeRE.FindStringSubmatch(report)
+	if m == nil {
+		return 0, 0, false
+	}
+	width, _ = strconv.Atoi(m[1])
+	height, _ = strconv.Atoi(m[2])
+	return width, height, width > 0 && height > 0
+}
+
+// videoSize asks ffmpeg for a video's width and height.
+func videoSize(ctx context.Context, ffmpeg, video string) (width, height int, ok bool) {
+	// With no output named ffmpeg describes the input and stops.
+	cmd := exec.CommandContext(ctx, ffmpeg, "-hide_banner", "-nostdin", "-i", video)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	cmd.Run() // "fails", for want of an output
+	return parseVideoSize(stderr.String())
+}
+
 // clipArgs are ffmpeg's arguments for cutting a plan's clip into the file
-// out.
+// out. logoW is the width to draw the logo at, 0 for no logo.
 //
 // The clip is encoded afresh rather than copied: a copy can only start on a
 // key frame, seconds away from where it should, and can't be cropped or
 // drawn on.
-func clipArgs(p clipPlan, out string, opts clipOptions) []string {
+func clipArgs(p clipPlan, out string, opts clipOptions, logoW int) []string {
 	secs := func(s float64) string { return strconv.FormatFloat(s, 'f', 3, 64) }
 	args := []string{
 		"-hide_banner", "-nostdin", "-loglevel", "error", "-y",
 		"-ss", secs(p.Start), "-t", secs(p.Length), "-i", p.Video,
-		"-map", "0:v:0", "-map", "0:a?",
 	}
-	var filters []string
+
+	// The picture itself, then what is drawn on it: drawn last, so it isn't
+	// cropped or turned over with the picture.
+	var picture, drawn []string
 	if opts.Crop && p.HasCrop {
-		filters = append(filters, cropFilter(p.Crop))
+		picture = append(picture, cropFilter(p.Crop))
 	}
 	if p.Mirror {
-		filters = append(filters, "hflip")
+		picture = append(picture, "hflip")
 	}
 	if p.Flip {
-		filters = append(filters, "vflip")
+		picture = append(picture, "vflip")
 	}
 	if opts.Timer {
-		filters = append(filters, timerFilter) // last, so it isn't cropped or turned over
+		drawn = append(drawn, timerFilter)
+		_, from := lapLines(p)
+		for i, at := range from {
+			drawn = append(drawn, fmt.Sprintf(lapFilter, i+1, i, at))
+		}
 	}
-	if len(filters) > 0 {
-		args = append(args, "-vf", strings.Join(filters, ","))
+
+	switch {
+	case opts.Logo && logoW > 0:
+		// The logo is a second input, laid over the picture.
+		if len(picture) == 0 {
+			picture = []string{"null"}
+		}
+		graph := "[0:v]" + strings.Join(picture, ",") + "[pic];" +
+			fmt.Sprintf("[1:v]scale=%d:-2,", logoW) + logoOverlay
+		if len(drawn) > 0 {
+			graph += "," + strings.Join(drawn, ",")
+		}
+		args = append(args, "-i", logoFile, "-filter_complex", graph+"[out]", "-map", "[out]", "-map", "0:a?")
+	default:
+		args = append(args, "-map", "0:v:0", "-map", "0:a?")
+		if filters := append(picture, drawn...); len(filters) > 0 {
+			args = append(args, "-vf", strings.Join(filters, ","))
+		}
 	}
 	return append(args,
 		"-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
@@ -517,17 +628,25 @@ func findFFmpeg(configured, tracksideDir string) (string, error) {
 }
 
 // cutClip runs ffmpeg to cut one clip. The clip is written under a temporary
-// name and only given its own once it is complete. timerDir is the folder
-// from timerFolder, needed if the clip is to have a timer.
-func cutClip(ctx context.Context, ffmpeg string, p clipPlan, file string, opts clipOptions, timerDir string) error {
+// name and only given its own once it is complete. dir is the folder from
+// overlayFolder, needed if anything is to be drawn on the clip, and logoW the
+// width to draw the logo at, 0 for none.
+func cutClip(ctx context.Context, ffmpeg string, p clipPlan, file string, opts clipOptions, dir string, logoW int) error {
 	part := file + ".part"
-	cmd := exec.CommandContext(ctx, ffmpeg, clipArgs(p, part, opts)...)
+	cmd := exec.CommandContext(ctx, ffmpeg, clipArgs(p, part, opts, logoW)...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000} // no console window
+	cmd.Dir = dir
 	if opts.Timer {
-		if err := os.WriteFile(filepath.Join(timerDir, timerTextFile), []byte(timerText(p.LapsAt, p.Run.Total)), 0600); err != nil {
-			return err
+		texts := map[string]string{timerTextFile: timerText(p.LapsAt, p.Run.Total)}
+		laps, _ := lapLines(p)
+		for i, line := range laps {
+			texts[fmt.Sprintf(lapTextFile, i+1)] = line
 		}
-		cmd.Dir = timerDir
+		for name, text := range texts {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(text), 0600); err != nil {
+				return err
+			}
+		}
 	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -553,22 +672,34 @@ func cutClip(ctx context.Context, ffmpeg string, p clipPlan, file string, opts c
 // exportClips cuts each plan's clip into folder, one after another, calling
 // done as each finishes or fails. It stops early if ctx is cancelled. The
 // error it returns is one that stopped it cutting any.
-func exportClips(ctx context.Context, ffmpeg, folder, track string, plans []clipPlan, opts clipOptions, done func(i int, name string, err error)) error {
-	timerDir := ""
-	if opts.Timer {
-		dir, err := timerFolder()
+func exportClips(ctx context.Context, ffmpeg, folder, track string, plans []clipPlan, opts clipOptions, logo []byte, done func(i int, name string, err error)) error {
+	dir := ""
+	if opts.Timer || opts.Logo {
+		made, err := overlayFolder(opts, logo)
 		if err != nil {
 			return err
 		}
-		defer os.RemoveAll(dir)
-		timerDir = dir
+		defer os.RemoveAll(made)
+		dir = made
 	}
+	widths := map[string]int{} // of the videos, so the logo can be sized to them
 	for i, p := range plans {
 		if ctx.Err() != nil {
 			return nil
 		}
+		logoW := 0
+		if opts.Logo {
+			width, known := widths[p.Video]
+			if !known {
+				width, _, _ = videoSize(ctx, ffmpeg, p.Video)
+				widths[p.Video] = width
+			}
+			if width > 0 {
+				logoW = logoWidth(p, opts, width)
+			}
+		}
 		name := clipFileName(track, p.Run.Name, p.Run.Total)
-		err := cutClip(ctx, ffmpeg, p, filepath.Join(folder, name), opts, timerDir)
+		err := cutClip(ctx, ffmpeg, p, filepath.Join(folder, name), opts, dir, logoW)
 		if ctx.Err() != nil {
 			return nil
 		}

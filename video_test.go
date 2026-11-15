@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"image/png"
 	"os"
 	"path/filepath"
 	"strings"
@@ -109,7 +111,7 @@ func TestClipNamesAndArgs(t *testing.T) {
 	}
 
 	p := clipPlan{Video: `C:\ev\race\0.mp4`, Start: 1795.3912, Length: 46.58, HasCrop: true, Crop: relRect{0.5625, 0, 0.375, 0.5}}
-	args := strings.Join(clipArgs(p, "out.part", clipOptions{Crop: true}), " ")
+	args := strings.Join(clipArgs(p, "out.part", clipOptions{Crop: true}, 0), " ")
 	for _, want := range []string{
 		`-ss 1795.391 -t 46.580 -i C:\ev\race\0.mp4`, // seeks before reading, so it is quick an hour in
 		"-vf crop=2*round(iw*0.937500/2)-2*round(iw*0.562500/2):2*round(ih*0.500000/2)-2*round(ih*0.000000/2):2*round(iw*0.562500/2):2*round(ih*0.000000/2)",
@@ -122,25 +124,128 @@ func TestClipNamesAndArgs(t *testing.T) {
 	if strings.Contains(args, "drawtext") {
 		t.Errorf("no timer asked for, but one is drawn: %s", args)
 	}
-	if whole := strings.Join(clipArgs(p, "out.part", clipOptions{}), " "); strings.Contains(whole, "-vf") {
+	if whole := strings.Join(clipArgs(p, "out.part", clipOptions{}, 0), " "); strings.Contains(whole, "-vf") || strings.Contains(whole, "filter_complex") {
 		t.Errorf("whole picture asked for, but there is a filter: %s", whole)
 	}
 	p.Mirror, p.Flip = true, true
-	if flipped := strings.Join(clipArgs(p, "out.part", clipOptions{}), " "); !strings.Contains(flipped, "-vf hflip,vflip") {
+	if flipped := strings.Join(clipArgs(p, "out.part", clipOptions{}, 0), " "); !strings.Contains(flipped, "-vf hflip,vflip") {
 		t.Errorf("a mirrored, upside-down source isn't put right: %s", flipped)
 	}
 
-	// The timer is drawn last: on the pilot's own picture, and not mirrored with it.
-	timed := clipArgs(p, "out.part", clipOptions{Crop: true, Timer: true})
-	vf := ""
-	for i, a := range timed {
-		if a == "-vf" {
-			vf = timed[i+1]
+	// argAfter is the argument that follows a flag.
+	argAfter := func(args []string, flag string) string {
+		for i, a := range args {
+			if a == flag && i+1 < len(args) {
+				return args[i+1]
+			}
+		}
+		return ""
+	}
+	// order checks that parts come one after another in s.
+	order := func(what, s string, parts ...string) {
+		t.Helper()
+		at := 0
+		for _, part := range parts {
+			i := strings.Index(s[at:], part)
+			if i < 0 {
+				t.Errorf("%s: %q is missing, or out of order, in\n%s", what, part, s)
+				return
+			}
+			at += i + len(part)
 		}
 	}
-	parts := strings.Split(vf, ",")
-	if len(parts) != 4 || !strings.HasPrefix(parts[0], "crop=") || parts[1] != "hflip" || parts[2] != "vflip" || !strings.HasPrefix(parts[3], "drawtext=fontfile=font.ttf:textfile=timer.txt:") {
-		t.Errorf("filters with a timer: %q", vf)
+
+	// The laps: 13.613, 13.153 and 13.814, the first starting 3s into the clip.
+	p.LapsAt = 3
+	p.Run = lapRun{Total: 40.58, Lap1: 13.613, Lap2: 13.153, Lap3: 13.814}
+
+	// The timer and lap times are drawn last: on the pilot's own picture, and
+	// not mirrored with it. Each lap's time shows from the moment it ends.
+	timed := clipArgs(p, "out.part", clipOptions{Crop: true, Timer: true}, 0)
+	order("timer", argAfter(timed, "-vf"), "crop=", ",hflip,vflip,",
+		"drawtext=fontfile=font.ttf:textfile=timer.txt:fontsize=h/11:",
+		"drawtext=fontfile=font.ttf:textfile=lap1.txt:fontsize=h/17:", "+0*(h/17+10):enable='gte(t,16.613)'",
+		"textfile=lap2.txt:", "+1*(h/17+10):enable='gte(t,29.766)'",
+		"textfile=lap3.txt:", "+2*(h/17+10):enable='gte(t,43.580)'")
+
+	// The logo is a second input, laid over the picture before the timer.
+	all := clipArgs(p, "out.part", clipOptions{Crop: true, Timer: true, Logo: true}, 120)
+	order("logo arguments", strings.Join(all, " "), `-i C:\ev\race\0.mp4`, "-i logo.png", "-filter_complex", "-map [out] -map 0:a?")
+	order("logo filters", argAfter(all, "-filter_complex"), "[0:v]crop=", ",hflip,vflip[pic];",
+		"[1:v]scale=120:-2,format=rgba,colorchannelmixer=aa=0.85[logo];",
+		"[pic][logo]overlay=x=W-w-W/40:y=H-h-W/40,", "textfile=timer.txt", "textfile=lap3.txt", "[out]")
+	if argAfter(all, "-vf") != "" {
+		t.Error("both -vf and -filter_complex given")
+	}
+
+	// The logo alone, on the whole picture of a source that isn't turned.
+	p.Mirror, p.Flip = false, false
+	if g := argAfter(clipArgs(p, "out.part", clipOptions{Logo: true}, 320), "-filter_complex"); g != "[0:v]null[pic];[1:v]scale=320:-2,format=rgba,colorchannelmixer=aa=0.85[logo];[pic][logo]overlay=x=W-w-W/40:y=H-h-W/40[out]" {
+		t.Errorf("logo alone: %s", g)
+	}
+	// Asked for, but the video's size couldn't be read: the clip is made without it.
+	if none := strings.Join(clipArgs(p, "out.part", clipOptions{Logo: true}, 0), " "); strings.Contains(none, "logo") {
+		t.Errorf("no size for the logo, yet it is drawn: %s", none)
+	}
+}
+
+func TestClockAndLapLines(t *testing.T) {
+	for secs, want := range map[float64]string{
+		0: "0.000", 4.25: "4.250", 13.6129999: "13.613", 59.9996: "1:00.000", 62.345: "1:02.345", 754.001: "12:34.001",
+	} {
+		if got := clock(secs); got != want {
+			t.Errorf("clock(%v) = %q, want %q", secs, got, want)
+		}
+	}
+	text, from := lapLines(clipPlan{LapsAt: 3, Run: lapRun{Lap1: 13.613, Lap2: 13.153, Lap3: 61.5}})
+	if text != [3]string{"L1 13.613", "L2 13.153", "L3 1:01.500"} {
+		t.Errorf("lap lines: %q", text)
+	}
+	if !near(from[0], 16.613) || !near(from[1], 29.766) || !near(from[2], 91.266) {
+		t.Errorf("shown from: %v", from)
+	}
+}
+
+func TestLogoSize(t *testing.T) {
+	p := clipPlan{HasCrop: true, Crop: relRect{0.564375, 0.0025, 0.37125, 0.495}} // 99% of one pilot's rectangle
+	// Cropped out of a 1280-wide video the picture is 476 wide; the logo a quarter of that.
+	if got := logoWidth(p, clipOptions{Crop: true}, 1280); got != 120 {
+		t.Errorf("on the pilot's own picture: %d, want 120", got)
+	}
+	if got := logoWidth(p, clipOptions{}, 1280); got != 320 {
+		t.Errorf("on the whole picture: %d, want 320", got)
+	}
+	if got := logoWidth(clipPlan{}, clipOptions{}, 64); got != 32 {
+		t.Errorf("never tiny: %d", got)
+	}
+
+	report := `Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'C:\ev\0.mp4':
+  Duration: 00:35:29.98, start: 0.000000, bitrate: 23423 kb/s
+  Stream #0:0[0x1](und): Video: h264 (Main) (avc1 / 0x31637661), yuv420p(progressive), 1280x720 [SAR 1:1 DAR 16:9], 23419 kb/s, 60 fps, 60 tbr, 60k tbn (default)
+At least one output file must be specified`
+	if w, h, ok := parseVideoSize(report); !ok || w != 1280 || h != 720 {
+		t.Errorf("size read as %dx%d (%v)", w, h, ok)
+	}
+	if _, _, ok := parseVideoSize("C:\\ev\\0.mp4: No such file or directory"); ok {
+		t.Error("a size was read from an error message")
+	}
+}
+
+func TestBuiltInLogo(t *testing.T) {
+	img, err := png.Decode(bytes.NewReader(builtInLogo))
+	if err != nil {
+		t.Fatalf("the built-in logo isn't a PNG: %v", err)
+	}
+	b := img.Bounds()
+	// Its corners are background, and have to be see-through.
+	for _, at := range [][2]int{{b.Min.X, b.Min.Y}, {b.Max.X - 1, b.Min.Y}, {b.Min.X, b.Max.Y - 1}, {b.Max.X - 1, b.Max.Y - 1}} {
+		if _, _, _, a := img.At(at[0], at[1]).RGBA(); a != 0 {
+			t.Errorf("the logo's corner at %v isn't see-through (alpha %d)", at, a>>8)
+		}
+	}
+	// And its middle is the logo.
+	if _, _, _, a := img.At((b.Min.X+b.Max.X)/2, (b.Min.Y+b.Max.Y)/2).RGBA(); a>>8 != 255 {
+		t.Errorf("the logo's middle is see-through (alpha %d)", a>>8)
 	}
 }
 
@@ -167,14 +272,30 @@ func TestTimerText(t *testing.T) {
 	}
 }
 
-func TestTimerFolder(t *testing.T) {
-	dir, err := timerFolder()
+func TestOverlayFolder(t *testing.T) {
+	dir, err := overlayFolder(clipOptions{Timer: true, Logo: true}, builtInLogo)
 	if err != nil {
 		t.Skipf("no font on this machine: %v", err)
 	}
 	defer os.RemoveAll(dir)
-	if st, err := os.Stat(filepath.Join(dir, timerFontFile)); err != nil || st.Size() < 1000 {
+	if st, err := os.Stat(filepath.Join(dir, overlayFontFile)); err != nil || st.Size() < 1000 {
 		t.Errorf("the font isn't in the folder: %v", err)
+	}
+	if st, err := os.Stat(filepath.Join(dir, logoFile)); err != nil || st.Size() != int64(len(builtInLogo)) {
+		t.Errorf("the logo isn't in the folder: %v", err)
+	}
+
+	// Only what is asked for is put there, and a missing logo is an error.
+	plain, err := overlayFolder(clipOptions{Logo: true}, builtInLogo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(plain)
+	if _, err := os.Stat(filepath.Join(plain, overlayFontFile)); err == nil {
+		t.Error("a font was put there with no timer asked for")
+	}
+	if _, err := overlayFolder(clipOptions{Logo: true}, nil); err == nil {
+		t.Error("no logo, and no error")
 	}
 }
 
