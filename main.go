@@ -29,13 +29,16 @@ var (
 	statusLbl   *walk.Label
 	showBoardAc *walk.Action
 	clubOnlyAc  *walk.Action
+	exportPB    *walk.PushButton
 	model       = &boardModel{}
 
 	cfg     settings
 	cfgFile string
 
-	eventsDir string
-	events    []eventListing
+	tracksideDir     string // FPVTrackside's own folder
+	tracksideProfile string // the profile it has loaded
+	eventsDir        string
+	events           []eventListing
 
 	loadedID, loadedName string
 	stopPoll             chan struct{}
@@ -269,7 +272,9 @@ func saveCfg() {
 // the folder chosen instead. If the folder can't be opened it says so and
 // offers to pick another.
 func findEvents() {
-	folder, profile := eventsFolder(filepath.Join(os.Getenv("LOCALAPPDATA"), "FPVTrackside"))
+	tracksideDir = filepath.Join(os.Getenv("LOCALAPPDATA"), "FPVTrackside")
+	folder, profile := eventsFolder(tracksideDir)
+	tracksideProfile = profile
 	source := fmt.Sprintf("FPVTrackside profile %q", profile)
 	if cfg.EventsFolder != "" {
 		folder, source = cfg.EventsFolder, "chosen folder"
@@ -297,7 +302,7 @@ func findEvents() {
 			logf("Events folder not found: %s", folder)
 			return
 		}
-		picked, ok := pickFolder(folder)
+		picked, ok := pickFolder("Choose FPVTrackside's events folder", folder)
 		if !ok {
 			return
 		}
@@ -307,11 +312,17 @@ func findEvents() {
 	}
 }
 
-func pickFolder(start string) (string, bool) {
+// pickFolder asks for a folder, starting at start.
+func pickFolder(title, start string) (string, bool) {
+	folder, ok, err := chooseFolder(mw, title, start)
+	if err == nil {
+		return folder, ok
+	}
+	// Windows' folder chooser wouldn't open: fall back on the plainer one.
+	logf("Folder chooser: %v", err)
 	dlg := new(walk.FileDialog)
-	dlg.Title = "Choose FPVTrackside's events folder"
-	dlg.FilePath = start
-	ok, err := dlg.ShowBrowseFolder(mw)
+	dlg.Title = title
+	ok, err = dlg.ShowBrowseFolder(mw)
 	if err != nil || !ok || dlg.FilePath == "" {
 		return "", false
 	}
@@ -321,7 +332,7 @@ func pickFolder(start string) (string, bool) {
 // chooseEventsFolder is the menu item: use a different events folder, or go
 // back to FPVTrackside's own by cancelling out of a failed one.
 func chooseEventsFolder() {
-	picked, ok := pickFolder(eventsDir)
+	picked, ok := pickFolder("Choose FPVTrackside's events folder", eventsDir)
 	if !ok {
 		return
 	}
@@ -902,6 +913,7 @@ func main() {
 				Text: "&MCS",
 				Items: []MenuItem{
 					Action{Text: "&Upload to MCS", OnTriggered: uploadTriggered},
+					Action{Text: "Export &video...", OnTriggered: exportVideoTriggered},
 					Separator{},
 					Action{AssignTo: &showBoardAc, Text: "Show track &leaderboard", Checkable: true, Checked: cfg.ShowBoard, OnTriggered: toggleShowBoard},
 					Action{AssignTo: &clubOnlyAc, Text: "My &club only", Checkable: true, Checked: cfg.ClubOnly, OnTriggered: toggleClubOnly},
@@ -928,6 +940,7 @@ func main() {
 					ComboBox{AssignTo: &eventCB, Model: []string{}, StretchFactor: 3},
 					PushButton{Text: "Load Event", MaxSize: Size{Width: 110}, OnClicked: loadEvent},
 					PushButton{Text: "Upload to MCS", MaxSize: Size{Width: 130}, OnClicked: uploadTriggered},
+					PushButton{AssignTo: &exportPB, Text: exportButtonText, MaxSize: Size{Width: 120}, OnClicked: exportVideoTriggered},
 					Label{Text: "Track:"},
 					ComboBox{AssignTo: &trackCB, Model: []string{}, StretchFactor: 2, OnCurrentIndexChanged: trackChosen},
 				},

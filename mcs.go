@@ -31,6 +31,9 @@ type settings struct {
 	FlagLapUnder float64             `json:"flag_lap_under"`          // flag laps quicker than this many seconds; 0 = don't
 	ShowBoard    bool                `json:"show_leaderboard"`
 	ClubOnly     bool                `json:"club_only"`
+	VideoFolder  string              `json:"video_folder,omitempty"`      // where videos were last exported to
+	WholeFrame   bool                `json:"video_whole_frame,omitempty"` // export the whole recorded picture, not just the pilot's
+	FFmpegPath   string              `json:"ffmpeg_path,omitempty"`       // ffmpeg.exe, if it isn't on the PATH
 }
 
 func loadSettings(file string) settings {

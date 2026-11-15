@@ -33,6 +33,34 @@ Windows only. `go test ./...` runs the tests.
    - DVR links are added afterwards on the MCS site; the window has a link to
      that page.
 
+### Export video
+
+**Export Video** cuts a video of each pilot's 3 laps, with 3 seconds before
+and after, out of the recordings FPVTrackside makes of its races. Add them to
+your times afterwards on the MCS site's DVR page.
+
+1. A window lists the pilots with tick boxes. A pilot whose laps have no
+   usable recording is greyed out, with the reason, and can't be ticked.
+2. Press **Export...** and choose the folder to save into. It opens at the
+   folder used last time.
+3. The clips are cut one after another; the log at the bottom shows progress,
+   and the button becomes **Stop Export** while it runs.
+
+Files are named `MCS - <track> - <pilot> - <time>.mp4`.
+
+- By default a clip is just the pilot's own picture, cut out of the recording
+  (which has all the pilots' pictures side by side). Untick "Only the pilot's
+  own picture" to keep the whole recorded picture.
+- FPVTrackside only records a video source that has **Record Video For
+  Replays** turned on in its video settings, and it only keeps so many videos
+  (**Videos To Keep**), deleting the oldest. If nothing can be exported the
+  program says which of those is the reason.
+- The race a pilot's laps are in has to have finished: Trackside can't share a
+  recording it is still writing.
+- The cutting is done by [ffmpeg](https://ffmpeg.org), which has to be
+  installed (`winget install ffmpeg`). If it isn't on the PATH, put the full
+  path of `ffmpeg.exe` in `mcs.json` as `"ffmpeg_path"`.
+
 ### Track leaderboard
 
 **MCS > Show track leaderboard** downloads the track's times from MCS and shows

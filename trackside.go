@@ -45,11 +45,15 @@ type raceDetection struct {
 }
 
 type raceRecord struct {
-	Laps       []raceLap       `json:"Laps"`
-	Detections []raceDetection `json:"Detections"`
-	Round      string          `json:"Round"`
-	Valid      bool            `json:"Valid"`
-	ID         string          `json:"ID"`
+	Laps          []raceLap       `json:"Laps"`
+	Detections    []raceDetection `json:"Detections"`
+	PilotChannels []struct {
+		Pilot   string `json:"Pilot"`
+		Channel string `json:"Channel"`
+	} `json:"PilotChannels"`
+	Round string `json:"Round"`
+	Valid bool   `json:"Valid"`
+	ID    string `json:"ID"`
 }
 
 // readJSONFile reads one of Trackside's JSON files into v.
@@ -201,6 +205,8 @@ type lapData struct {
 	PilotID string
 	Number  int
 	Seconds float64
+	Start   time.Time // when the lap began and ended, as Race.json has them;
+	End     time.Time // zero if it has none
 }
 
 // sectorTime is one sector of one lap.
@@ -218,7 +224,8 @@ type raceData struct {
 	Valid       bool
 	Laps        []lapData
 	Sectors     []sectorTime
-	SectorCount int // sectors in a lap of this race; 0 without split gates
+	SectorCount int               // sectors in a lap of this race; 0 without split gates
+	Channels    map[string]string // pilot ID -> the ID of the channel they flew on
 }
 
 // parseRace keeps what counts from a Race.json: the laps ended by a valid
@@ -228,13 +235,18 @@ func parseRace(id string, r raceRecord) *raceData {
 	for _, d := range r.Detections {
 		byID[d.ID] = d
 	}
-	race := &raceData{ID: id, RoundID: r.Round, Valid: r.Valid}
+	race := &raceData{ID: id, RoundID: r.Round, Valid: r.Valid, Channels: map[string]string{}}
+	for _, pc := range r.PilotChannels {
+		race.Channels[pc.Pilot] = pc.Channel
+	}
 	for _, lap := range r.Laps {
 		det, ok := byID[lap.Detection]
 		if !ok || !det.Valid {
 			continue
 		}
-		race.Laps = append(race.Laps, lapData{lap.ID, det.Pilot, lap.LapNumber, lap.LengthSeconds})
+		start, _ := parseTracksideTime(lap.StartTime)
+		end, _ := parseTracksideTime(lap.EndTime)
+		race.Laps = append(race.Laps, lapData{lap.ID, det.Pilot, lap.LapNumber, lap.LengthSeconds, start, end})
 	}
 	race.Sectors, race.SectorCount = lapSectors(r.Laps, r.Detections)
 	return race
