@@ -109,7 +109,7 @@ func chooseAndExport(ffmpeg string, plans []clipPlan, notRecording bool) {
 	if notRecording {
 		note = "FPVTrackside isn't set to record races at the moment, so races flown now won't have video. " + howToRecord
 	}
-	picked, crop, ok := chooseClips(plans, note)
+	picked, opts, ok := chooseClips(plans, note)
 	if !ok {
 		return
 	}
@@ -117,9 +117,9 @@ func chooseAndExport(ffmpeg string, plans []clipPlan, notRecording bool) {
 	if !ok {
 		return
 	}
-	cfg.VideoFolder, cfg.WholeFrame = folder, !crop
+	cfg.VideoFolder, cfg.WholeFrame, cfg.VideoTimer = folder, !opts.Crop, opts.Timer
 	saveCfg()
-	startExport(ffmpeg, folder, cfg.TrackName, picked, crop)
+	startExport(ffmpeg, folder, cfg.TrackName, picked, opts)
 }
 
 // exportModel is the list of pilots in the export window, each with a tick
@@ -190,9 +190,9 @@ func (m *exportModel) ticked() int {
 }
 
 // chooseClips shows the pilots whose laps can be exported, each with a tick
-// box, and asks which to export. It returns the clips chosen, whether to keep
-// only each pilot's own picture, and whether to go ahead.
-func chooseClips(plans []clipPlan, note string) (picked []clipPlan, crop, ok bool) {
+// box, and asks which to export and how. It returns the clips chosen, the
+// choices made about them, and whether to go ahead.
+func chooseClips(plans []clipPlan, note string) (picked []clipPlan, opts clipOptions, ok bool) {
 	m := &exportModel{plans: plans, ticks: make([]bool, len(plans))}
 	recorded := 0
 	for i, p := range plans {
@@ -211,7 +211,7 @@ func chooseClips(plans []clipPlan, note string) (picked []clipPlan, crop, ok boo
 
 	var dlg *walk.Dialog
 	var countLbl *walk.Label
-	var cropCB *walk.CheckBox
+	var cropCB, timerCB *walk.CheckBox
 	var exportPB, cancelPB *walk.PushButton
 	m.changed = func() {
 		countLbl.SetText(countText())
@@ -249,13 +249,20 @@ func chooseClips(plans []clipPlan, note string) (picked []clipPlan, crop, ok boo
 					HSpacer{},
 				},
 			},
+			Composite{
+				Layout: HBox{MarginsZero: true},
+				Children: []Widget{
+					CheckBox{AssignTo: &timerCB, Text: "Timer on the video, to the millisecond: starts with the first lap and stops at the end of the third", Checked: cfg.VideoTimer},
+					HSpacer{},
+				},
+			},
 			Label{Text: fmt.Sprintf("You are asked for the folder next. Files are named like:  %s", clipFileName(cfg.TrackName, "pilot name", plans[0].Run.Total))},
 			Composite{
 				Layout: HBox{MarginsZero: true},
 				Children: []Widget{
 					HSpacer{},
 					PushButton{AssignTo: &exportPB, Text: "Export...", Enabled: m.ticked() > 0, OnClicked: func() {
-						crop = cropCB.Checked()
+						opts = clipOptions{Crop: cropCB.Checked(), Timer: timerCB.Checked()}
 						dlg.Accept()
 					}},
 					PushButton{AssignTo: &cancelPB, Text: "Cancel", OnClicked: func() { dlg.Cancel() }},
@@ -265,22 +272,22 @@ func chooseClips(plans []clipPlan, note string) (picked []clipPlan, crop, ok boo
 	}.Run(mw)
 	if err != nil {
 		logf("Export window failed: %v", err)
-		return nil, false, false
+		return nil, clipOptions{}, false
 	}
 	if cmd != walk.DlgCmdOK {
-		return nil, false, false
+		return nil, clipOptions{}, false
 	}
 	for i, p := range plans {
 		if m.ticks[i] {
 			picked = append(picked, p)
 		}
 	}
-	return picked, crop, len(picked) > 0
+	return picked, opts, len(picked) > 0
 }
 
 // startExport cuts the clips in the background, saying in the log how it is
 // going, and sums up when it is done.
-func startExport(ffmpeg, folder, track string, clips []clipPlan, crop bool) {
+func startExport(ffmpeg, folder, track string, clips []clipPlan, opts clipOptions) {
 	ctx, cancel := context.WithCancel(context.Background())
 	exportCancel = cancel
 	exportPB.SetText(stopButtonText)
@@ -289,7 +296,7 @@ func startExport(ffmpeg, folder, track string, clips []clipPlan, crop bool) {
 
 	made, failed := 0, 0 // counted on the UI thread
 	go func() {
-		exportClips(ctx, ffmpeg, folder, track, clips, crop, func(i int, name string, err error) {
+		setupErr := exportClips(ctx, ffmpeg, folder, track, clips, opts, func(i int, name string, err error) {
 			mw.Synchronize(func() {
 				if err != nil {
 					failed++
@@ -305,6 +312,11 @@ func startExport(ffmpeg, folder, track string, clips []clipPlan, crop bool) {
 		mw.Synchronize(func() {
 			exportCancel = nil
 			exportPB.SetText(exportButtonText)
+			if setupErr != nil {
+				logf("Video: %v", setupErr)
+				walk.MsgBox(mw, exportTitle, fmt.Sprintf("No videos were made: %v.", setupErr), walk.MsgBoxIconWarning)
+				return
+			}
 			text := fmt.Sprintf("%d of %d videos saved", made, total)
 			if stopped {
 				text += ", then stopped"

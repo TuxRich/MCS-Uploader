@@ -109,7 +109,7 @@ func TestClipNamesAndArgs(t *testing.T) {
 	}
 
 	p := clipPlan{Video: `C:\ev\race\0.mp4`, Start: 1795.3912, Length: 46.58, HasCrop: true, Crop: relRect{0.5625, 0, 0.375, 0.5}}
-	args := strings.Join(clipArgs(p, "out.part", true), " ")
+	args := strings.Join(clipArgs(p, "out.part", clipOptions{Crop: true}), " ")
 	for _, want := range []string{
 		`-ss 1795.391 -t 46.580 -i C:\ev\race\0.mp4`, // seeks before reading, so it is quick an hour in
 		"-vf crop=2*round(iw*0.937500/2)-2*round(iw*0.562500/2):2*round(ih*0.500000/2)-2*round(ih*0.000000/2):2*round(iw*0.562500/2):2*round(ih*0.000000/2)",
@@ -119,12 +119,62 @@ func TestClipNamesAndArgs(t *testing.T) {
 			t.Errorf("arguments lack %q:\n%s", want, args)
 		}
 	}
-	if whole := strings.Join(clipArgs(p, "out.part", false), " "); strings.Contains(whole, "-vf") {
+	if strings.Contains(args, "drawtext") {
+		t.Errorf("no timer asked for, but one is drawn: %s", args)
+	}
+	if whole := strings.Join(clipArgs(p, "out.part", clipOptions{}), " "); strings.Contains(whole, "-vf") {
 		t.Errorf("whole picture asked for, but there is a filter: %s", whole)
 	}
 	p.Mirror, p.Flip = true, true
-	if flipped := strings.Join(clipArgs(p, "out.part", false), " "); !strings.Contains(flipped, "-vf hflip,vflip") {
+	if flipped := strings.Join(clipArgs(p, "out.part", clipOptions{}), " "); !strings.Contains(flipped, "-vf hflip,vflip") {
 		t.Errorf("a mirrored, upside-down source isn't put right: %s", flipped)
+	}
+
+	// The timer is drawn last: on the pilot's own picture, and not mirrored with it.
+	timed := clipArgs(p, "out.part", clipOptions{Crop: true, Timer: true})
+	vf := ""
+	for i, a := range timed {
+		if a == "-vf" {
+			vf = timed[i+1]
+		}
+	}
+	parts := strings.Split(vf, ",")
+	if len(parts) != 4 || !strings.HasPrefix(parts[0], "crop=") || parts[1] != "hflip" || parts[2] != "vflip" || !strings.HasPrefix(parts[3], "drawtext=fontfile=font.ttf:textfile=timer.txt:") {
+		t.Errorf("filters with a timer: %q", vf)
+	}
+}
+
+func TestTimerText(t *testing.T) {
+	// Under a minute: seconds and milliseconds. The first lap starts 3s in
+	// and the three laps take 24.617s.
+	want := "%{eif:floor(round(clip(t-3.000,0,24.617)*1000)/1000):d}.%{eif:mod(round(clip(t-3.000,0,24.617)*1000),1000):d:3}"
+	if got := timerText(3, 24.617); got != want {
+		t.Errorf("short run:\n got %s\nwant %s", got, want)
+	}
+	// A minute or more: minutes too, and seconds always two digits.
+	long := timerText(1.25, 84.2)
+	for _, part := range []string{
+		"%{eif:floor(round(clip(t-1.250,0,84.200)*1000)/60000):d}:",
+		":%{eif:floor(mod(round(clip(t-1.250,0,84.200)*1000),60000)/1000):d:2}.",
+		".%{eif:mod(round(clip(t-1.250,0,84.200)*1000),1000):d:3}",
+	} {
+		if !strings.Contains(long, part) {
+			t.Errorf("long run lacks %q:\n%s", part, long)
+		}
+	}
+	if strings.ContainsAny(timerText(3, 24.617)+long, "\r\n") {
+		t.Error("a line break in the timer's text would be drawn")
+	}
+}
+
+func TestTimerFolder(t *testing.T) {
+	dir, err := timerFolder()
+	if err != nil {
+		t.Skipf("no font on this machine: %v", err)
+	}
+	defer os.RemoveAll(dir)
+	if st, err := os.Stat(filepath.Join(dir, timerFontFile)); err != nil || st.Size() < 1000 {
+		t.Errorf("the font isn't in the folder: %v", err)
 	}
 }
 
@@ -197,7 +247,7 @@ func TestPlanClips(t *testing.T) {
 	// Laps 1-3 run 14:00:10 to 14:00:40; the video began at 13:59:55, so the
 	// clip, 3s either side, is from 12s in and 36s long.
 	p := plans[0]
-	if p.Problem != "" || !near(p.Start, 12) || !near(p.Length, 36) || filepath.Base(p.Video) != "0.mp4" {
+	if p.Problem != "" || !near(p.Start, 12) || !near(p.Length, 36) || !near(p.LapsAt, 3) || filepath.Base(p.Video) != "0.mp4" {
 		t.Errorf("recorded: %+v", p)
 	}
 	if !p.HasCrop || p.Crop != (relRect{0, 0, 0.5, 0.5}) || p.Mirror || p.Flip {

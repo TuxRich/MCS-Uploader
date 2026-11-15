@@ -51,6 +51,11 @@ Files are named `MCS - <track> - <pilot> - <time>.mp4`.
 - By default a clip is just the pilot's own picture, cut out of the recording
   (which has all the pilots' pictures side by side). Untick "Only the pilot's
   own picture" to keep the whole recorded picture.
+- By default a timer is drawn at the top right of the video. It shows 0 until
+  the first lap starts, counts to the millisecond through the three laps, and
+  stops on the pilot's 3-lap time: `24.617`, or `1:24.617` for a minute or
+  more. Untick "Timer on the video" to leave it off. Both choices are
+  remembered.
 - FPVTrackside only records a video source that has **Record Video For
   Replays** turned on in its video settings, and it only keeps so many videos
   (**Videos To Keep**), deleting the oldest. If nothing can be exported the

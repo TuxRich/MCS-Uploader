@@ -251,6 +251,7 @@ type clipPlan struct {
 	Video   string
 	Start   float64 // seconds into the video where the clip starts
 	Length  float64 // seconds
+	LapsAt  float64 // seconds into the clip where the first lap starts
 	Crop    relRect // where the pilot's own picture is in the video's frame
 	HasCrop bool
 	Mirror  bool   // the picture has to be mirrored, or turned upside down,
@@ -292,6 +293,7 @@ func planClips(e *eventData, runs []lapRun) []clipPlan {
 			p.Problem = "Trackside has no times for these laps"
 			continue
 		}
+		firstLap := from
 		from, to = from.Add(-clipPad), to.Add(clipPad)
 
 		f, ok := byRace[run.RaceID]
@@ -342,6 +344,7 @@ func planClips(e *eventData, runs []lapRun) []clipPlan {
 			continue
 		}
 		p.Start, p.Length = start, end-start
+		p.LapsAt = rec.position(firstLap) - start
 	}
 	return plans
 }
@@ -398,13 +401,71 @@ func cropFilter(r relRect) string {
 	return fmt.Sprintf("crop=%s-%s:%s-%s:%s:%s", right, left, bottom, top, left, top)
 }
 
+// clipOptions are the choices made about how clips are cut.
+type clipOptions struct {
+	Crop  bool // just the pilot's own picture, where the recording says where that is
+	Timer bool // a timer on the picture, running over the three laps
+}
+
+// The timer is drawn by ffmpeg from two files it finds in the folder it is
+// run in (see timerFolder), so that no path has to be written into a filter,
+// where colons, quotes and backslashes all mean something.
+const (
+	timerFontFile = "font.ttf"
+	timerTextFile = "timer.txt"
+	// Top right, where pilots' on-screen displays tend to have nothing; white
+	// on a dark box so it reads over any picture; sized to the picture.
+	timerFilter = "drawtext=fontfile=" + timerFontFile + ":textfile=" + timerTextFile +
+		":fontsize=h/11:fontcolor=white:box=1:boxcolor=black@0.55:boxborderw=6:x=w-text_w-w/30:y=h/30"
+)
+
+// timerText is what ffmpeg is given to draw as the timer: text that it works
+// out afresh for every frame from the frame's time in the clip, t. The timer
+// shows 0 until the first lap starts, lapsAt seconds in, runs for the three
+// laps, and stops on their total. It reads to the millisecond: 24.617, or
+// 1:24.617 when the total is a minute or more.
+func timerText(lapsAt, total float64) string {
+	// The time shown, in whole milliseconds, so the parts below agree.
+	ms := fmt.Sprintf("round(clip(t-%.3f,0,%.3f)*1000)", lapsAt, total)
+	if total < 60 {
+		return fmt.Sprintf("%%{eif:floor(%s/1000):d}.%%{eif:mod(%s,1000):d:3}", ms, ms)
+	}
+	return fmt.Sprintf("%%{eif:floor(%s/60000):d}:%%{eif:floor(mod(%s,60000)/1000):d:2}.%%{eif:mod(%s,1000):d:3}", ms, ms, ms)
+}
+
+// timerFolder makes a folder for ffmpeg to run in when it draws timers, with
+// a font in it. A font whose digits are all one width, so the timer doesn't
+// shake as it counts.
+func timerFolder() (string, error) {
+	fonts := filepath.Join(os.Getenv("WINDIR"), "Fonts")
+	var font []byte
+	for _, name := range []string{"consola.ttf", "lucon.ttf", "cour.ttf", "arial.ttf"} {
+		if data, err := os.ReadFile(filepath.Join(fonts, name)); err == nil {
+			font = data
+			break
+		}
+	}
+	if font == nil {
+		return "", fmt.Errorf("no font for the timer was found in %s", fonts)
+	}
+	dir, err := os.MkdirTemp("", "mcs-uploader-")
+	if err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(filepath.Join(dir, timerFontFile), font, 0600); err != nil {
+		os.RemoveAll(dir)
+		return "", err
+	}
+	return dir, nil
+}
+
 // clipArgs are ffmpeg's arguments for cutting a plan's clip into the file
-// out. With crop the clip is just the pilot's own picture, where the
-// recording says where that is.
+// out.
 //
 // The clip is encoded afresh rather than copied: a copy can only start on a
-// key frame, seconds away from where it should, and can't be cropped.
-func clipArgs(p clipPlan, out string, crop bool) []string {
+// key frame, seconds away from where it should, and can't be cropped or
+// drawn on.
+func clipArgs(p clipPlan, out string, opts clipOptions) []string {
 	secs := func(s float64) string { return strconv.FormatFloat(s, 'f', 3, 64) }
 	args := []string{
 		"-hide_banner", "-nostdin", "-loglevel", "error", "-y",
@@ -412,7 +473,7 @@ func clipArgs(p clipPlan, out string, crop bool) []string {
 		"-map", "0:v:0", "-map", "0:a?",
 	}
 	var filters []string
-	if crop && p.HasCrop {
+	if opts.Crop && p.HasCrop {
 		filters = append(filters, cropFilter(p.Crop))
 	}
 	if p.Mirror {
@@ -420,6 +481,9 @@ func clipArgs(p clipPlan, out string, crop bool) []string {
 	}
 	if p.Flip {
 		filters = append(filters, "vflip")
+	}
+	if opts.Timer {
+		filters = append(filters, timerFilter) // last, so it isn't cropped or turned over
 	}
 	if len(filters) > 0 {
 		args = append(args, "-vf", strings.Join(filters, ","))
@@ -453,11 +517,18 @@ func findFFmpeg(configured, tracksideDir string) (string, error) {
 }
 
 // cutClip runs ffmpeg to cut one clip. The clip is written under a temporary
-// name and only given its own once it is complete.
-func cutClip(ctx context.Context, ffmpeg string, p clipPlan, file string, crop bool) error {
+// name and only given its own once it is complete. timerDir is the folder
+// from timerFolder, needed if the clip is to have a timer.
+func cutClip(ctx context.Context, ffmpeg string, p clipPlan, file string, opts clipOptions, timerDir string) error {
 	part := file + ".part"
-	cmd := exec.CommandContext(ctx, ffmpeg, clipArgs(p, part, crop)...)
+	cmd := exec.CommandContext(ctx, ffmpeg, clipArgs(p, part, opts)...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000} // no console window
+	if opts.Timer {
+		if err := os.WriteFile(filepath.Join(timerDir, timerTextFile), []byte(timerText(p.LapsAt, p.Run.Total)), 0600); err != nil {
+			return err
+		}
+		cmd.Dir = timerDir
+	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -480,17 +551,28 @@ func cutClip(ctx context.Context, ffmpeg string, p clipPlan, file string, crop b
 }
 
 // exportClips cuts each plan's clip into folder, one after another, calling
-// done as each finishes or fails. It stops early if ctx is cancelled.
-func exportClips(ctx context.Context, ffmpeg, folder, track string, plans []clipPlan, crop bool, done func(i int, name string, err error)) {
+// done as each finishes or fails. It stops early if ctx is cancelled. The
+// error it returns is one that stopped it cutting any.
+func exportClips(ctx context.Context, ffmpeg, folder, track string, plans []clipPlan, opts clipOptions, done func(i int, name string, err error)) error {
+	timerDir := ""
+	if opts.Timer {
+		dir, err := timerFolder()
+		if err != nil {
+			return err
+		}
+		defer os.RemoveAll(dir)
+		timerDir = dir
+	}
 	for i, p := range plans {
 		if ctx.Err() != nil {
-			return
+			return nil
 		}
 		name := clipFileName(track, p.Run.Name, p.Run.Total)
-		err := cutClip(ctx, ffmpeg, p, filepath.Join(folder, name), crop)
+		err := cutClip(ctx, ffmpeg, p, filepath.Join(folder, name), opts, timerDir)
 		if ctx.Err() != nil {
-			return
+			return nil
 		}
 		done(i, name, err)
 	}
+	return nil
 }
