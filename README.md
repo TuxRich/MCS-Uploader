@@ -63,6 +63,13 @@ Files are named `MCS - <track> - <pilot> - <time>.mp4`.
   program; to use another, put a `logo.png` with a see-through background
   beside `MCS-Uploader.exe`.
 - All three choices are remembered.
+- A video less than 720 pixels high is enlarged to 720 high: one pilot's
+  picture out of four is only about 476 by 356, and YouTube and the like
+  give a video that small so little data that it looks bad. Enlarging adds no
+  detail, but gets the video treated as HD. The files are larger and take
+  longer to make. To enlarge to a different height put, say,
+  `"video_min_height": 1080` in `mcs.json`; `0` leaves videos the size they
+  are.
 - FPVTrackside only records a video source that has **Record Video For
   Replays** turned on in its video settings, and it only keeps so many videos
   (**Videos To Keep**), deleting the oldest. If nothing can be exported the

@@ -407,7 +407,15 @@ type clipOptions struct {
 	Crop  bool // just the pilot's own picture, where the recording says where that is
 	Timer bool // a timer on the picture, running over the three laps, and each lap's time under it
 	Logo  bool // the MCS logo in a corner of the picture
+	// A picture less than this many pixels high is enlarged to it; 0 leaves
+	// every picture the size it is. One pilot's picture out of four is small,
+	// and video sites give small videos so little data that they look bad.
+	MinHeight int
 }
+
+// defaultMinHeight is the height small clips are enlarged to unless the
+// settings say otherwise: enough for video sites to treat a clip as HD.
+const defaultMinHeight = 720
 
 // What is put on the picture is drawn by ffmpeg from files it finds in the
 // folder it is run in (see overlayFolder), so that no path has to be written
@@ -514,14 +522,27 @@ func overlayFolder(opts clipOptions, logo []byte) (string, error) {
 // crop filter does.
 func evenPixels(x float64) int { return 2 * int(x/2+0.5) }
 
-// logoWidth is how wide the logo is drawn on a plan's clip, given the width
-// of the video the clip is cut from.
-func logoWidth(p clipPlan, opts clipOptions, videoWidth int) int {
-	width := float64(videoWidth)
+// pictureSize is the size of a plan's clip, given the size of the video it
+// is cut from: cropped to the pilot's picture, then enlarged if it is small.
+func pictureSize(p clipPlan, opts clipOptions, videoW, videoH int) (width, height int) {
+	width, height = videoW, videoH
 	if opts.Crop && p.HasCrop {
-		width = float64(evenPixels((p.Crop.X+p.Crop.W)*width) - evenPixels(p.Crop.X*width))
+		w, h := float64(videoW), float64(videoH)
+		width = evenPixels((p.Crop.X+p.Crop.W)*w) - evenPixels(p.Crop.X*w)
+		height = evenPixels((p.Crop.Y+p.Crop.H)*h) - evenPixels(p.Crop.Y*h)
 	}
-	return max(32, evenPixels(width*logoShare))
+	if height > 0 && height < opts.MinHeight {
+		width = evenPixels(float64(width) * float64(opts.MinHeight) / float64(height))
+		height = opts.MinHeight
+	}
+	return width, height
+}
+
+// logoWidth is how wide the logo is drawn on a plan's clip, given the size
+// of the video the clip is cut from.
+func logoWidth(p clipPlan, opts clipOptions, videoW, videoH int) int {
+	width, _ := pictureSize(p, opts, videoW, videoH)
+	return max(32, evenPixels(float64(width)*logoShare))
 }
 
 var videoSizeRE = regexp.MustCompile(`Video:.*?\b(\d{2,5})x(\d{2,5})\b`)
@@ -572,6 +593,12 @@ func clipArgs(p clipPlan, out string, opts clipOptions, logoW int) []string {
 	}
 	if p.Flip {
 		picture = append(picture, "vflip")
+	}
+	if opts.MinHeight > 0 {
+		// Enlarged before anything is drawn on it, so the timer and logo are
+		// drawn sharp at the final size. A picture already tall enough keeps
+		// its height, which makes this do nothing.
+		picture = append(picture, fmt.Sprintf("scale=-2:'max(%d,ih)':flags=lanczos", opts.MinHeight))
 	}
 	if opts.Timer {
 		drawn = append(drawn, timerFilter)
@@ -682,20 +709,20 @@ func exportClips(ctx context.Context, ffmpeg, folder, track string, plans []clip
 		defer os.RemoveAll(made)
 		dir = made
 	}
-	widths := map[string]int{} // of the videos, so the logo can be sized to them
+	sizes := map[string][2]int{} // of the videos, so the logo can be sized to them
 	for i, p := range plans {
 		if ctx.Err() != nil {
 			return nil
 		}
 		logoW := 0
 		if opts.Logo {
-			width, known := widths[p.Video]
+			size, known := sizes[p.Video]
 			if !known {
-				width, _, _ = videoSize(ctx, ffmpeg, p.Video)
-				widths[p.Video] = width
+				size[0], size[1], _ = videoSize(ctx, ffmpeg, p.Video)
+				sizes[p.Video] = size
 			}
-			if width > 0 {
-				logoW = logoWidth(p, opts, width)
+			if size[0] > 0 && size[1] > 0 {
+				logoW = logoWidth(p, opts, size[0], size[1])
 			}
 		}
 		name := clipFileName(track, p.Run.Name, p.Run.Total)

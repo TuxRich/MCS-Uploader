@@ -36,10 +36,12 @@ type settings struct {
 	FFmpegPath   string              `json:"ffmpeg_path,omitempty"`       // ffmpeg.exe, if it isn't on the PATH
 	VideoTimer   bool                `json:"video_timer"`                 // draw a timer and lap times on exported videos
 	VideoLogo    bool                `json:"video_logo"`                  // put the MCS logo in the corner of exported videos
+	MinHeight    int                 `json:"video_min_height"`            // enlarge exported videos less than this high; 0 = don't
 }
 
 func loadSettings(file string) settings {
-	s := settings{FlagLapUnder: defaultLapLimit, VideoTimer: true, VideoLogo: true} // unless the file says otherwise
+	// Unless the file says otherwise:
+	s := settings{FlagLapUnder: defaultLapLimit, VideoTimer: true, VideoLogo: true, MinHeight: defaultMinHeight}
 	if data, err := os.ReadFile(file); err == nil {
 		_ = json.Unmarshal(data, &s)
 	}

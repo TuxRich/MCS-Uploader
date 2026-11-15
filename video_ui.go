@@ -119,6 +119,7 @@ func chooseAndExport(ffmpeg string, plans []clipPlan, notRecording bool) {
 	}
 	cfg.VideoFolder, cfg.WholeFrame, cfg.VideoTimer, cfg.VideoLogo = folder, !opts.Crop, opts.Timer, opts.Logo
 	saveCfg()
+	opts.MinHeight = max(0, cfg.MinHeight)
 	startExport(ffmpeg, folder, cfg.TrackName, picked, opts)
 }
 
@@ -262,6 +263,10 @@ func chooseClips(plans []clipPlan, note string) (picked []clipPlan, opts clipOpt
 					CheckBox{AssignTo: &logoCB, Text: "MCS logo in the corner of the video", Checked: cfg.VideoLogo},
 					HSpacer{},
 				},
+			},
+			Label{
+				Visible: cfg.MinHeight > 0,
+				Text:    fmt.Sprintf("A video less than %d high is enlarged to %d, as video sites show small videos badly.", cfg.MinHeight, cfg.MinHeight),
 			},
 			Label{Text: fmt.Sprintf("You are asked for the folder next. Files are named like:  %s", clipFileName(cfg.TrackName, "pilot name", plans[0].Run.Total))},
 			Composite{

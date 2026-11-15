@@ -178,6 +178,17 @@ func TestClipNamesAndArgs(t *testing.T) {
 		t.Error("both -vf and -filter_complex given")
 	}
 
+	// A small picture is enlarged after it is cropped and turned, and before
+	// anything is drawn on it, so the timer and logo are sharp.
+	enlarged := clipArgs(p, "out.part", clipOptions{Crop: true, Timer: true, Logo: true, MinHeight: 720}, 240)
+	order("enlarged", argAfter(enlarged, "-filter_complex"), "[0:v]crop=", ",hflip,vflip,scale=-2:'max(720,ih)':flags=lanczos[pic];",
+		"[1:v]scale=240:-2,", "overlay=", "textfile=timer.txt")
+	order("enlarged, nothing drawn", argAfter(clipArgs(p, "out.part", clipOptions{Crop: true, MinHeight: 720}, 0), "-vf"),
+		"crop=", ",hflip,vflip,scale=-2:'max(720,ih)':flags=lanczos")
+	if strings.Contains(strings.Join(timed, " "), "scale=") {
+		t.Error("no minimum height given, yet the picture is scaled")
+	}
+
 	// The logo alone, on the whole picture of a source that isn't turned.
 	p.Mirror, p.Flip = false, false
 	if g := argAfter(clipArgs(p, "out.part", clipOptions{Logo: true}, 320), "-filter_complex"); g != "[0:v]null[pic];[1:v]scale=320:-2,format=rgba,colorchannelmixer=aa=0.85[logo];[pic][logo]overlay=x=W-w-W/40:y=H-h-W/40[out]" {
@@ -208,15 +219,38 @@ func TestClockAndLapLines(t *testing.T) {
 
 func TestLogoSize(t *testing.T) {
 	p := clipPlan{HasCrop: true, Crop: relRect{0.564375, 0.0025, 0.37125, 0.495}} // 99% of one pilot's rectangle
-	// Cropped out of a 1280-wide video the picture is 476 wide; the logo a quarter of that.
-	if got := logoWidth(p, clipOptions{Crop: true}, 1280); got != 120 {
+	// Cropped out of a 1280x720 video the picture is 476x356; the logo a quarter of its width.
+	if w, h := pictureSize(p, clipOptions{Crop: true}, 1280, 720); w != 476 || h != 356 {
+		t.Errorf("the pilot's own picture: %dx%d, want 476x356", w, h)
+	}
+	if got := logoWidth(p, clipOptions{Crop: true}, 1280, 720); got != 120 {
 		t.Errorf("on the pilot's own picture: %d, want 120", got)
 	}
-	if got := logoWidth(p, clipOptions{}, 1280); got != 320 {
+	if got := logoWidth(p, clipOptions{}, 1280, 720); got != 320 {
 		t.Errorf("on the whole picture: %d, want 320", got)
 	}
-	if got := logoWidth(clipPlan{}, clipOptions{}, 64); got != 32 {
+	if got := logoWidth(clipPlan{}, clipOptions{}, 64, 48); got != 32 {
 		t.Errorf("never tiny: %d", got)
+	}
+
+	// Enlarged to 720 high, the pilot's picture is 962 wide, and the logo is
+	// sized to that. A picture already 720 high, or higher, is left alone.
+	big := clipOptions{Crop: true, MinHeight: 720}
+	if w, h := pictureSize(p, big, 1280, 720); w != 962 || h != 720 {
+		t.Errorf("enlarged: %dx%d, want 962x720", w, h)
+	}
+	if got := logoWidth(p, big, 1280, 720); got != 240 {
+		t.Errorf("logo on the enlarged picture: %d, want 240", got)
+	}
+	if w, h := pictureSize(p, clipOptions{MinHeight: 720}, 1280, 720); w != 1280 || h != 720 {
+		t.Errorf("a 720-high picture was changed: %dx%d", w, h)
+	}
+	if w, h := pictureSize(p, clipOptions{MinHeight: 720}, 1920, 1080); w != 1920 || h != 1080 {
+		t.Errorf("a 1080-high picture was changed: %dx%d", w, h)
+	}
+	// The whole picture of a small recording is enlarged too.
+	if w, h := pictureSize(p, clipOptions{MinHeight: 720}, 640, 480); w != 960 || h != 720 {
+		t.Errorf("a 640x480 recording: %dx%d, want 960x720", w, h)
 	}
 
 	report := `Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'C:\ev\0.mp4':

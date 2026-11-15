@@ -213,7 +213,7 @@ func TestUploadTicks(t *testing.T) {
 func TestSettingsRoundTrip(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "mcs.json")
 	s := loadSettings(file) // no file yet
-	if s.Uploads == nil || s.api().Base != mcsDefaultBaseURL || s.FlagLapUnder != 9 || !s.VideoTimer || !s.VideoLogo {
+	if s.Uploads == nil || s.api().Base != mcsDefaultBaseURL || s.FlagLapUnder != 9 || !s.VideoTimer || !s.VideoLogo || s.MinHeight != 720 {
 		t.Fatalf("defaults: %+v", s)
 	}
 	// A settings file from before the lap limit existed gets the default; one
