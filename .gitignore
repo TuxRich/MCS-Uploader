@@ -1,0 +1,4 @@
+# Holds the MCS API key
+mcs.json
+
+*.exe
