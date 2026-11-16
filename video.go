@@ -258,6 +258,9 @@ type clipPlan struct {
 	Mirror  bool   // the picture has to be mirrored, or turned upside down,
 	Flip    bool   // to look as it did in Trackside
 	Problem string // why no clip can be cut; "" if one can
+	// MCS is the time on MCS the clip would be the DVR of, when clips can be
+	// put on the league's YouTube channel; see matchVideos.
+	MCS videoMatch
 }
 
 // planClips works out, for each run, which recording has it and where.
@@ -411,6 +414,10 @@ type clipOptions struct {
 	// every picture the size it is. One pilot's picture out of four is small,
 	// and video sites give small videos so little data that they look bad.
 	MinHeight int
+	// Upload puts each clip, once cut, on the league's YouTube channel
+	// through the MCS site, against the pilot's time there. It doesn't change
+	// how a clip is cut.
+	Upload bool
 }
 
 // defaultMinHeight is the height small clips are enlarged to unless the

@@ -80,6 +80,27 @@ Files are named `MCS - <track> - <pilot> - <time>.mp4`.
   installed (`winget install ffmpeg`). If it isn't on the PATH, put the full
   path of `ffmpeg.exe` in `mcs.json` as `"ffmpeg_path"`.
 
+#### Straight onto YouTube
+
+If the MCS site has the league's YouTube channel connected, the export window
+offers **Put each video on the MCS YouTube channel, and its link against the
+pilot's time on MCS**. Each clip is then uploaded as soon as it is cut, and
+its link is put on the pilot's time for you: there is nothing to paste on the
+DVR page. No YouTube account is needed, only your MCS API key; the videos go
+on the league's channel, named `MCS - <track> - <pilot> - <time>`.
+
+- **Upload the event's times first.** A video goes against a time that is
+  already on MCS. The **On MCS** column says, for each pilot, whether their
+  video can go up, or why not: no time on MCS, a time that has changed since
+  it was uploaded (upload the times again), or a video already there.
+- A pilot who already has a video on MCS is left alone. To replace it, clear
+  the link on the MCS DVR page first.
+- When the option can't be used the window says why: no API key, the site
+  has no channel connected, or the event's times haven't been uploaded.
+- Each club can upload 40 videos a day.
+- **Stop Export** stops uploads as well. A video being sent when it is
+  pressed is abandoned.
+
 ### Track leaderboard
 
 **MCS > Show track leaderboard** downloads the track's times from MCS and shows

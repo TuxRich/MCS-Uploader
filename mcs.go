@@ -36,6 +36,7 @@ type settings struct {
 	FFmpegPath   string              `json:"ffmpeg_path,omitempty"`       // ffmpeg.exe, if it isn't on the PATH
 	VideoTimer   bool                `json:"video_timer"`                 // draw a timer and lap times on exported videos
 	VideoLogo    bool                `json:"video_logo"`                  // put the MCS logo in the corner of exported videos
+	VideoUpload  bool                `json:"video_upload,omitempty"`      // put exported videos on the league's YouTube channel through MCS
 	MinHeight    int                 `json:"video_min_height"`            // enlarge exported videos less than this high; 0 = don't
 }
 
@@ -216,6 +217,9 @@ type mcsMe struct {
 	Role   string `json:"role"`
 	ClubID int64  `json:"club_id"`
 	Club   string `json:"club"`
+	// VideoUpload is whether the site can put videos on the league's YouTube
+	// channel: an admin has connected the channel.
+	VideoUpload bool `json:"video_upload"`
 }
 
 func (a mcsAPI) me() (mcsMe, error) {

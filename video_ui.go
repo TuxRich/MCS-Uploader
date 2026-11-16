@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -56,18 +57,25 @@ func exportVideoTriggered() {
 	preparingExport = true
 	dir, id, name := eventsDir, loadedID, loadedName
 	tsDir, tsProfile := tracksideDir, tracksideProfile
+	api, hasKey, timesUpload := cfg.api(), cfg.APIKey != "", cfg.Uploads[loadedID]
 	go func() {
 		// Its own reading of the event, so as not to share the live one.
 		ev := newEventData(dir, id, name)
 		_, readErr := ev.refresh()
-		plans := planClips(ev, consecutiveLapTotals(ev, 3))
+		runs := consecutiveLapTotals(ev, 3)
+		plans := planClips(ev, runs)
 		records, known := tracksideRecords(tsDir, tsProfile)
+		// Whether the videos can go on the league's YouTube channel as well.
+		offer := checkVideoUpload(api, hasKey, timesUpload, runs)
+		for i := range offer.Matches {
+			plans[i].MCS = offer.Matches[i]
+		}
 		mw.Synchronize(func() {
 			preparingExport = false
 			if readErr != nil {
 				logf("Reading the event: %v", readErr)
 			}
-			chooseAndExport(ffmpeg, plans, known && !records)
+			chooseAndExport(ffmpeg, api, plans, offer, known && !records)
 		})
 	}()
 }
@@ -75,7 +83,7 @@ func exportVideoTriggered() {
 // chooseAndExport takes it from the clips that could be cut to cutting them:
 // the window to choose pilots in, then the folder to save into.
 // notRecording is that FPVTrackside isn't set to record races.
-func chooseAndExport(ffmpeg string, plans []clipPlan, notRecording bool) {
+func chooseAndExport(ffmpeg string, api mcsAPI, plans []clipPlan, offer videoOffer, notRecording bool) {
 	const howToRecord = "To record races, turn on \"Record Video For Replays\" for the video source in FPVTrackside's video settings."
 	if len(plans) == 0 {
 		walk.MsgBox(mw, exportTitle, "No pilot has 3 consecutive laps yet, so there are no clips to cut.", walk.MsgBoxIconInformation)
@@ -109,7 +117,7 @@ func chooseAndExport(ffmpeg string, plans []clipPlan, notRecording bool) {
 	if notRecording {
 		note = "FPVTrackside isn't set to record races at the moment, so races flown now won't have video. " + howToRecord
 	}
-	picked, opts, ok := chooseClips(plans, note)
+	picked, opts, ok := chooseClips(plans, note, offer)
 	if !ok {
 		return
 	}
@@ -118,9 +126,12 @@ func chooseAndExport(ffmpeg string, plans []clipPlan, notRecording bool) {
 		return
 	}
 	cfg.VideoFolder, cfg.WholeFrame, cfg.VideoTimer, cfg.VideoLogo = folder, !opts.Crop, opts.Timer, opts.Logo
+	if offer.Available {
+		cfg.VideoUpload = opts.Upload // only a choice when it was on offer
+	}
 	saveCfg()
 	opts.MinHeight = max(0, cfg.MinHeight)
-	startExport(ffmpeg, folder, cfg.TrackName, picked, opts)
+	startExport(ffmpeg, api, folder, cfg.TrackName, picked, opts)
 }
 
 // exportModel is the list of pilots in the export window, each with a tick
@@ -129,6 +140,7 @@ type exportModel struct {
 	walk.TableModelBase
 	plans   []clipPlan
 	ticks   []bool
+	upload  bool // the videos can be put on YouTube through MCS
 	changed func()
 }
 
@@ -156,6 +168,14 @@ func (m *exportModel) Value(row, col int) interface{} {
 			return "Recorded, but the pilot's own picture isn't marked: whole picture"
 		}
 		return "Recorded"
+	case 4:
+		switch {
+		case !m.upload || p.Problem != "":
+		case p.MCS.Why != "":
+			return p.MCS.Why
+		default:
+			return "Can go on YouTube"
+		}
 	}
 	return ""
 }
@@ -193,8 +213,8 @@ func (m *exportModel) ticked() int {
 // chooseClips shows the pilots whose laps can be exported, each with a tick
 // box, and asks which to export and how. It returns the clips chosen, the
 // choices made about them, and whether to go ahead.
-func chooseClips(plans []clipPlan, note string) (picked []clipPlan, opts clipOptions, ok bool) {
-	m := &exportModel{plans: plans, ticks: make([]bool, len(plans))}
+func chooseClips(plans []clipPlan, note string, offer videoOffer) (picked []clipPlan, opts clipOptions, ok bool) {
+	m := &exportModel{plans: plans, ticks: make([]bool, len(plans)), upload: offer.Available}
 	recorded := 0
 	for i, p := range plans {
 		if p.Problem == "" {
@@ -212,11 +232,19 @@ func chooseClips(plans []clipPlan, note string) (picked []clipPlan, opts clipOpt
 
 	var dlg *walk.Dialog
 	var countLbl *walk.Label
-	var cropCB, timerCB, logoCB *walk.CheckBox
+	var cropCB, timerCB, logoCB, uploadCB *walk.CheckBox
 	var exportPB, cancelPB *walk.PushButton
 	m.changed = func() {
 		countLbl.SetText(countText())
 		exportPB.SetEnabled(m.ticked() > 0)
+	}
+
+	// Putting the videos on YouTube, where that is on offer; and why not,
+	// where it isn't.
+	uploadText := "Put each video on the MCS YouTube channel, and its link against the pilot's time on MCS"
+	uploadHint := "The videos go on the league's channel through the MCS site; no YouTube account is needed. Each club can upload 40 a day."
+	if !offer.Available {
+		uploadHint = "Not available: " + offer.Why
 	}
 
 	cmd, err := Dialog{
@@ -224,7 +252,7 @@ func chooseClips(plans []clipPlan, note string) (picked []clipPlan, opts clipOpt
 		Title:         exportTitle,
 		DefaultButton: &exportPB,
 		CancelButton:  &cancelPB,
-		MinSize:       Size{Width: 760, Height: 560},
+		MinSize:       Size{Width: 960, Height: 620},
 		Layout:        VBox{},
 		Children: []Widget{
 			Label{Text: "A video of each ticked pilot's 3 laps, with 3 seconds before and after, is cut from FPVTrackside's recording of the race."},
@@ -239,7 +267,8 @@ func chooseClips(plans []clipPlan, note string) (picked []clipPlan, opts clipOpt
 					{Title: "Pilot", Width: 200},
 					{Title: "3 laps", Width: 70, Alignment: AlignFar},
 					{Title: "Video", Width: 70, Alignment: AlignFar},
-					{Title: "Recording", Width: 360},
+					{Title: "Recording", Width: 290},
+					{Title: "On MCS", Width: 280},
 				},
 			},
 			Label{AssignTo: &countLbl, Text: countText()},
@@ -268,13 +297,24 @@ func chooseClips(plans []clipPlan, note string) (picked []clipPlan, opts clipOpt
 				Visible: cfg.MinHeight > 0,
 				Text:    fmt.Sprintf("A video less than %d high is enlarged to %d, as video sites show small videos badly.", cfg.MinHeight, cfg.MinHeight),
 			},
+			Composite{
+				Layout: HBox{MarginsZero: true},
+				Children: []Widget{
+					CheckBox{AssignTo: &uploadCB, Text: uploadText, Enabled: offer.Available, Checked: offer.Available && cfg.VideoUpload},
+					HSpacer{},
+				},
+			},
+			Label{Text: uploadHint, TextColor: walk.RGB(110, 110, 110)},
 			Label{Text: fmt.Sprintf("You are asked for the folder next. Files are named like:  %s", clipFileName(cfg.TrackName, "pilot name", plans[0].Run.Total))},
 			Composite{
 				Layout: HBox{MarginsZero: true},
 				Children: []Widget{
 					HSpacer{},
 					PushButton{AssignTo: &exportPB, Text: "Export...", Enabled: m.ticked() > 0, OnClicked: func() {
-						opts = clipOptions{Crop: cropCB.Checked(), Timer: timerCB.Checked(), Logo: logoCB.Checked()}
+						opts = clipOptions{
+							Crop: cropCB.Checked(), Timer: timerCB.Checked(), Logo: logoCB.Checked(),
+							Upload: offer.Available && uploadCB.Checked(),
+						}
 						dlg.Accept()
 					}},
 					PushButton{AssignTo: &cancelPB, Text: "Cancel", OnClicked: func() { dlg.Cancel() }},
@@ -298,15 +338,17 @@ func chooseClips(plans []clipPlan, note string) (picked []clipPlan, opts clipOpt
 }
 
 // startExport cuts the clips in the background, saying in the log how it is
-// going, and sums up when it is done.
-func startExport(ffmpeg, folder, track string, clips []clipPlan, opts clipOptions) {
+// going, and sums up when it is done. With the upload option each clip is
+// put on YouTube through MCS as soon as it is cut.
+func startExport(ffmpeg string, api mcsAPI, folder, track string, clips []clipPlan, opts clipOptions) {
 	ctx, cancel := context.WithCancel(context.Background())
 	exportCancel = cancel
 	exportPB.SetText(stopButtonText)
 	total := len(clips)
 	logf("Video: cutting %d clips into %s", total, folder)
 
-	made, failed := 0, 0 // counted on the UI thread
+	made, failed := 0, 0                  // counted on the UI thread
+	linked, notLinked, skipped := 0, 0, 0 // likewise: clips put on YouTube, or not
 	logo := videoLogo()
 	go func() {
 		setupErr := exportClips(ctx, ffmpeg, folder, track, clips, opts, logo, func(i int, name string, err error) {
@@ -318,6 +360,33 @@ func startExport(ffmpeg, folder, track string, clips []clipPlan, opts clipOption
 				}
 				made++
 				logf("Video: %d of %d  %s", i+1, total, name)
+			})
+			if err != nil || !opts.Upload {
+				return
+			}
+			// Onto YouTube, and against the pilot's time on MCS. This runs
+			// here, between clips, so one video is sent at a time.
+			clip := clips[i]
+			if clip.MCS.Why != "" || clip.MCS.ResultID == 0 {
+				mw.Synchronize(func() {
+					skipped++
+					logf("YouTube: %s not uploaded. %s", clip.Run.Name, clip.MCS.Why)
+				})
+				return
+			}
+			mw.Synchronize(func() { logf("YouTube: uploading %s...", clip.Run.Name) })
+			link, upErr := api.uploadVideo(ctx, clip.MCS.ResultID, filepath.Join(folder, name))
+			if ctx.Err() != nil {
+				return // stopped part-way; the summary says so
+			}
+			mw.Synchronize(func() {
+				if upErr != nil {
+					notLinked++
+					logf("YouTube: %s could not be uploaded: %v", clip.Run.Name, upErr)
+					return
+				}
+				linked++
+				logf("YouTube: %s is at %s and against their time on MCS", clip.Run.Name, link)
 			})
 		})
 		stopped := ctx.Err() != nil
@@ -338,11 +407,23 @@ func startExport(ffmpeg, folder, track string, clips []clipPlan, opts clipOption
 				text += fmt.Sprintf("; %d couldn't be made (see the log at the bottom of the window)", failed)
 			}
 			logf("Video: %s", text)
+			uploads := ""
+			if opts.Upload {
+				uploads = fmt.Sprintf("%d put on YouTube and against their times on MCS", linked)
+				if notLinked > 0 {
+					uploads += fmt.Sprintf("; %d couldn't be uploaded (see the log)", notLinked)
+				}
+				if skipped > 0 {
+					uploads += fmt.Sprintf("; %d left out, for the reason in the On MCS column", skipped)
+				}
+				logf("YouTube: %s", uploads)
+				uploads = "\n\n" + uploads + "."
+			}
 			if made == 0 {
 				walk.MsgBox(mw, exportTitle, text+".", walk.MsgBoxIconWarning)
 				return
 			}
-			if walk.MsgBox(mw, exportTitle, fmt.Sprintf("%s in\n%s\n\nOpen the folder?", text, folder),
+			if walk.MsgBox(mw, exportTitle, fmt.Sprintf("%s in\n%s%s\n\nOpen the folder?", text, folder, uploads),
 				walk.MsgBoxIconInformation|walk.MsgBoxYesNo) == walk.DlgCmdYes {
 				if err := exec.Command("explorer", folder).Start(); err != nil {
 					logf("Couldn't open %s: %v", folder, err)
