@@ -14,6 +14,14 @@ import (
 
 const appTitle = "MCS Uploader"
 
+// iconResource is the number the program's icon has among the exe's
+// resources: rsrc gives the manifest 1 and the icon the next.
+const iconResource = 2
+
+// appIcon is the program's icon, for its windows; nil if it couldn't be
+// loaded, when Windows' plain one is shown.
+var appIcon walk.Image
+
 // pollInterval is how often a loaded event's folder is checked for changes.
 const pollInterval = 3 * time.Second
 
@@ -730,6 +738,7 @@ func confirmUpload(rows []mcsRow, trackName string, replacing bool, skipped []st
 
 	cmd, err := Dialog{
 		AssignTo:      &dlg,
+		Icon:          appIcon,
 		Title:         "Upload to MCS",
 		DefaultButton: &uploadPB,
 		CancelButton:  &cancelPB,
@@ -831,6 +840,7 @@ func showSettings() {
 
 	cmd, err := Dialog{
 		AssignTo:      &dlg,
+		Icon:          appIcon,
 		Title:         "MCS Settings",
 		DefaultButton: &okPB,
 		CancelButton:  &cancelPB,
@@ -902,16 +912,36 @@ func showSettings() {
 	rebuild()
 }
 
+// showAbout is Help > About: the version, and where the program is finding
+// things.
+func showAbout() {
+	walk.MsgBox(mw, "About "+appTitle, aboutText(cfg, cfgFile, tracksideDir, tracksideProfile, eventsDir), walk.MsgBoxIconInformation)
+}
+
 func main() {
-	cfgFile = "mcs.json"
+	exeDir := ""
 	if exe, err := os.Executable(); err == nil {
-		cfgFile = filepath.Join(filepath.Dir(exe), "mcs.json")
+		exeDir = filepath.Dir(exe)
 	}
+	userDir, _ := os.UserConfigDir()
+	cfgFile = settingsPath(exeDir, userDir)
 	cfg = loadSettings(cfgFile)
+	tracksideDir = filepath.Join(os.Getenv("LOCALAPPDATA"), "FPVTrackside")
+
+	// The installer, asking what this computer hasn't got: no window.
+	if len(os.Args) > 1 && os.Args[1] == "-check" {
+		os.Exit(missingParts(cfg, tracksideDir))
+	}
+	markRunning()
+	// The program's icon is in the exe (rsrc.syso, made from icon.ico).
+	if icon, err := walk.NewIconFromResourceId(iconResource); err == nil {
+		appIcon = icon
+	}
 
 	err := MainWindow{
 		AssignTo: &mw,
-		Title:    appTitle,
+		Title:    versionTitle(),
+		Icon:     appIcon,
 		Size:     Size{Width: 1170, Height: 800},
 		MenuItems: []MenuItem{
 			Menu{
@@ -934,6 +964,12 @@ func main() {
 					Action{Text: "&Reload event list", OnTriggered: findEvents},
 					Action{Text: "&Choose events folder...", OnTriggered: chooseEventsFolder},
 					Action{Text: "Use &FPVTrackside's events folder", OnTriggered: useTracksideFolder},
+				},
+			},
+			Menu{
+				Text: "&Help",
+				Items: []MenuItem{
+					Action{Text: "&About " + appTitle, OnTriggered: showAbout},
 				},
 			},
 		},
@@ -985,6 +1021,7 @@ func main() {
 		os.Exit(0)
 	})
 
+	logf("%s. Settings: %s", versionTitle(), cfgFile)
 	rebuild()
 	showTracks() // the chosen track, until the list arrives
 	findEvents()

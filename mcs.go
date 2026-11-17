@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -16,7 +17,25 @@ import (
 
 const mcsDefaultBaseURL = "https://mcs.fpv-events.com"
 
-// settings is kept in mcs.json beside the program, so the API key, chosen
+const (
+	settingsName   = "mcs.json"
+	settingsFolder = "MCS Uploader" // in the user's own settings folder (%APPDATA%)
+)
+
+// settingsPath is where the settings are kept. A mcs.json beside the program
+// is used if there is one, which is where it always used to be. Otherwise
+// they go in the user's own settings folder: an installed program's folder
+// isn't always one it may write to, and settings kept there outlive an
+// update or a reinstall.
+func settingsPath(exeDir, userDir string) string {
+	beside := filepath.Join(exeDir, settingsName)
+	if st, err := os.Stat(beside); (err == nil && !st.IsDir()) || userDir == "" {
+		return beside
+	}
+	return filepath.Join(userDir, settingsFolder, settingsName)
+}
+
+// settings is kept in mcs.json (see settingsPath), so the API key, chosen
 // track and each event's upload id survive restarts.
 type settings struct {
 	BaseURL      string              `json:"base_url,omitempty"` // override for testing; empty = live site
@@ -59,6 +78,11 @@ func (s settings) save(file string) error {
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return err
+	}
+	if dir := filepath.Dir(file); dir != "." {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return err
+		}
 	}
 	return os.WriteFile(file, data, 0600)
 }
@@ -103,6 +127,7 @@ func (a mcsAPI) do(method, path string, auth bool, body, out any) error {
 	if err != nil {
 		return err
 	}
+	req.Header.Set("User-Agent", userAgent())
 	if auth {
 		req.Header.Set("X-API-Key", a.Key)
 	}

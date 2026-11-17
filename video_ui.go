@@ -289,6 +289,7 @@ func chooseClips(plans []clipPlan, note string, offer videoOffer) (picked []clip
 
 	cmd, err := Dialog{
 		AssignTo:      &dlg,
+		Icon:          appIcon,
 		Title:         exportTitle,
 		DefaultButton: &exportPB,
 		CancelButton:  &cancelPB,

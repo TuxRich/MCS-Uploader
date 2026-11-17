@@ -2,3 +2,6 @@
 mcs.json
 
 *.exe
+
+# Installers made by release.cmd
+dist/

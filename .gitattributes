@@ -6,3 +6,8 @@ go.mod text eol=lf
 go.sum text eol=lf
 
 *.syso binary
+
+*.ico binary
+
+# Batch files need Windows line endings for their labels to work
+*.cmd text eol=crlf

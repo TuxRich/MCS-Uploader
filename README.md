@@ -4,7 +4,42 @@ Follows an FPVTrackside event live and uploads its best 3-lap times to the
 MCS (Micro Club Sprint) site. It is the MCS part of Trackside-to-SQLite on its
 own: no database, lineups or lap graphs.
 
-## Build and run
+## Installing
+
+Run `MCS-Uploader-Setup-v<version>.exe`. It installs for you only, so it needs
+no administrator, and puts MCS Uploader in the Start menu and, unless you
+untick it, on the desktop.
+
+Before it installs, it looks for the two programs MCS Uploader works with and
+shows what it found:
+
+- **FPVTrackside**, whose events MCS Uploader reads. If it isn't there the
+  installer says so and carries on.
+- **ffmpeg**, which Export Video cuts the videos with. If it isn't there the
+  installer offers to download and install it (about 110 MB) with winget,
+  Windows' own installer of programs. Untick that to do without; everything
+  but Export Video works without ffmpeg.
+
+Things to know:
+
+- The installer isn't signed, so Windows may say it "protected your PC" when
+  it is run from a download. **More info**, then **Run anyway**.
+- Installing a newer version over an older one keeps your settings. Close MCS
+  Uploader first; the installer asks if it is still open.
+- To remove it, use Windows' **Installed apps**. You are asked whether to
+  remove your settings (API key, track, which events were uploaded) as well.
+
+### Which version you have
+
+The version is in the window's title (`MCS Uploader v1.1`) and is the first
+line of the log. **Help > About MCS Uploader** shows it with where the program
+is finding its settings, FPVTrackside, the events folder and ffmpeg: what to
+send with a question. Ctrl+C copies it. It never shows the API key.
+
+The MCS site is also told the version with everything the program sends it
+(`MCS-Uploader/1.1`), so the site's records show which version uploaded what.
+
+## Building
 
 ```
 build.cmd
@@ -12,6 +47,21 @@ MCS-Uploader.exe
 ```
 
 Windows only. `go test ./...` runs the tests.
+
+`release.cmd` tests and builds the program and then its installer, into
+`dist\MCS-Uploader-Setup-v<version>.exe`. It needs
+[Inno Setup 6](https://jrsoftware.org/isinfo.php)
+(`winget install JRSoftware.InnoSetup`); the installer itself is
+`installer\MCS-Uploader.iss`.
+
+- **The version number** is the one line in the `VERSION` file. The program,
+  the installer's name and Windows' list of installed apps all take it from
+  there, so that is the only place to change it.
+- **The icon**, `icon.ico`, is made from `logo.png` by
+  `go run ./installer/mkicon`, which also makes the picture on the
+  installer's pages. The exe carries the icon in `rsrc.syso`; after changing
+  the icon, make that again with [rsrc](https://github.com/akavel/rsrc):
+  `rsrc -manifest MCS-Uploader.exe.manifest -ico icon.ico -o rsrc.syso`.
 
 ## Using it
 
@@ -81,8 +131,9 @@ Files are named `MCS - <track> - <pilot> - <time>.mp4`.
 - The race a pilot's laps are in has to have finished: Trackside can't share a
   recording it is still writing.
 - The cutting is done by [ffmpeg](https://ffmpeg.org), which has to be
-  installed (`winget install ffmpeg`). If it isn't on the PATH, put the full
-  path of `ffmpeg.exe` in `mcs.json` as `"ffmpeg_path"`.
+  installed. The installer offers to do that; otherwise
+  `winget install ffmpeg`. If it isn't on the PATH, put the full path of
+  `ffmpeg.exe` in `mcs.json` as `"ffmpeg_path"`.
 
 #### Straight onto YouTube
 
@@ -162,6 +213,13 @@ and it is up to you to untick them.
   from its settings (`%LOCALAPPDATA%\FPVTrackside`, the loaded profile's Event
   Storage Location). If it can't be opened you are asked to choose a folder;
   the **Events** menu changes it or goes back to FPVTrackside's.
-- Settings are in `mcs.json` beside the program. It holds the API key, so it
-  is git-ignored. `"base_url"` in it points the program at another MCS server
-  for testing.
+- Settings are in `mcs.json`, in `%APPDATA%\MCS Uploader`. **Help > About**
+  shows exactly where. It holds the API key.
+  - If there is a `mcs.json` beside the program, that one is used instead.
+    That is where settings were kept before v1.1, so a copy of the program
+    with its settings beside it carries on as it was; it is also how a copy
+    can be given settings of its own. An installed copy doesn't see those:
+    put your API key in again, or copy that `mcs.json` into
+    `%APPDATA%\MCS Uploader`.
+  - `mcs.json` is git-ignored, for the copy beside a program built here.
+  - `"base_url"` in it points the program at another MCS server for testing.

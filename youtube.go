@@ -73,6 +73,7 @@ func putVideo(ctx context.Context, url, file string, size int64, contentType, ke
 	}
 	req.ContentLength = size
 	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("User-Agent", userAgent())
 	if key != "" {
 		req.Header.Set("X-API-Key", key)
 	}

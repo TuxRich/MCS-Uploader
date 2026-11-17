@@ -14,6 +14,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/windows/registry"
 )
 
 // Video clips of pilots' 3-lap runs, cut out of the recordings FPVTrackside
@@ -640,8 +642,8 @@ func clipArgs(p clipPlan, out string, opts clipOptions, logoW int) []string {
 }
 
 // findFFmpeg finds the ffmpeg program: the one named in the settings, else
-// the one on the PATH, else one in FPVTrackside's folder, where Trackside
-// looks for its own.
+// the one on the PATH, else one installed since this program was started,
+// else one in FPVTrackside's folder, where Trackside looks for its own.
 func findFFmpeg(configured, tracksideDir string) (string, error) {
 	if configured != "" {
 		if st, err := os.Stat(configured); err != nil || st.IsDir() {
@@ -652,13 +654,70 @@ func findFFmpeg(configured, tracksideDir string) (string, error) {
 	if path, err := exec.LookPath("ffmpeg"); err == nil {
 		return path, nil
 	}
-	for _, name := range []string{filepath.Join("ffmpeg", "ffmpeg.exe"), "ffmpeg.exe"} {
-		path := filepath.Join(tracksideDir, name)
-		if st, err := os.Stat(path); err == nil && !st.IsDir() {
-			return path, nil
-		}
+	folders := append(currentPath(), wingetFolders(os.Getenv("LOCALAPPDATA"))...)
+	folders = append(folders, filepath.Join(tracksideDir, "ffmpeg"), tracksideDir)
+	if path := ffmpegIn(folders); path != "" {
+		return path, nil
 	}
 	return "", errors.New("ffmpeg wasn't found")
+}
+
+// ffmpegIn is the first ffmpeg.exe in the folders, or "".
+func ffmpegIn(folders []string) string {
+	for _, dir := range folders {
+		if dir == "" {
+			continue
+		}
+		path := filepath.Join(dir, "ffmpeg.exe")
+		if st, err := os.Stat(path); err == nil && !st.IsDir() {
+			return path
+		}
+	}
+	return ""
+}
+
+// currentPath is the PATH Windows would give a program started now: the
+// user's own and then the computer's, as the registry has them. This
+// program's PATH is the one from when it (or the installer that started it)
+// was started, so an ffmpeg installed since is only on this one.
+func currentPath() []string {
+	var dirs []string
+	for _, k := range []struct {
+		root registry.Key
+		path string
+	}{
+		{registry.CURRENT_USER, `Environment`},
+		{registry.LOCAL_MACHINE, `SYSTEM\CurrentControlSet\Control\Session Manager\Environment`},
+	} {
+		key, err := registry.OpenKey(k.root, k.path, registry.QUERY_VALUE)
+		if err != nil {
+			continue
+		}
+		value, _, err := key.GetStringValue("Path")
+		key.Close()
+		if err != nil {
+			continue
+		}
+		if expanded, err := registry.ExpandString(value); err == nil {
+			value = expanded
+		}
+		dirs = append(dirs, filepath.SplitList(value)...)
+	}
+	return dirs
+}
+
+// wingetFolders are where winget (Windows' own installer of programs, which
+// this program's installer uses) puts an ffmpeg: a link in its Links folder
+// where it can make one, and the package itself. localAppData is the user's
+// %LOCALAPPDATA%.
+func wingetFolders(localAppData string) []string {
+	if localAppData == "" {
+		return nil
+	}
+	base := filepath.Join(localAppData, "Microsoft", "WinGet")
+	dirs := []string{filepath.Join(base, "Links")}
+	packages, _ := filepath.Glob(filepath.Join(base, "Packages", "Gyan.FFmpeg*", "*", "bin"))
+	return append(dirs, packages...)
 }
 
 // cutClip runs ffmpeg to cut one clip. The clip is written under a temporary
