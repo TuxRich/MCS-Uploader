@@ -32,6 +32,10 @@ Windows only. `go test ./...` runs the tests.
      next time.
    - DVR links are added afterwards on the MCS site; the window has a link to
      that page.
+   - Once the times are uploaded, the **Export Video** window (below) opens
+     by itself if FPVTrackside recorded any of these pilots' laps, so the
+     videos can follow the times. Press **Cancel** in it if you don't want
+     them. It doesn't open if there is no recording to export.
 
 ### Export video
 
@@ -88,6 +92,9 @@ pilot's time on MCS**. Each clip is then uploaded as soon as it is cut, and
 its link is put on the pilot's time for you: there is nothing to paste on the
 DVR page. No YouTube account is needed, only your MCS API key; the videos go
 on the league's channel, named `MCS - <track> - <pilot> - <time>`.
+
+The option is ticked to begin with. Untick it to keep the videos off YouTube;
+like the other choices, that is remembered.
 
 - **Upload the event's times first.** A video goes against a time that is
   already on MCS. The **On MCS** column says, for each pilot, whether their

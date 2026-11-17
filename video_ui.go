@@ -10,6 +10,7 @@ import (
 
 	"github.com/lxn/walk"
 	. "github.com/lxn/walk/declarative"
+	"github.com/lxn/win"
 )
 
 const (
@@ -24,33 +25,60 @@ var (
 	exportCancel    context.CancelFunc // stops the export that is running; nil if none is
 )
 
-// exportVideoTriggered is the Export Video button and menu item. It looks
-// over the loaded event's recordings, shows which pilots' laps can be cut out
-// of them, and cuts the ones chosen. While an export is running the button
-// stops it instead.
+// exportVideoTriggered is the Export Video button and menu item. While an
+// export is running the button stops it instead.
 func exportVideoTriggered() {
 	if exportCancel != nil {
 		exportCancel()
 		return
 	}
-	if preparingExport {
+	openExport(false)
+}
+
+// exportAfterUpload opens the export window by itself once the loaded
+// event's times are on MCS, so that its videos can follow them.
+func exportAfterUpload() { openExport(true) }
+
+// recordedClips counts the clips that have a recording to be cut from.
+func recordedClips(plans []clipPlan) int {
+	n := 0
+	for _, p := range plans {
+		if p.Problem == "" {
+			n++
+		}
+	}
+	return n
+}
+
+// openExport looks over the loaded event's recordings, shows which pilots'
+// laps can be cut out of them, and cuts the ones chosen.
+//
+// unasked is that nobody pressed Export Video: the window is opening by
+// itself, after the times were uploaded. It then opens only if a pilot's laps
+// were recorded, and whatever else would stop an export goes unsaid or, at
+// most, in the log: nobody asked, so nothing gets in their way.
+func openExport(unasked bool) {
+	if preparingExport || exportCancel != nil {
 		return
 	}
+	warn := func(text string) {
+		if !unasked {
+			walk.MsgBox(mw, exportTitle, text, walk.MsgBoxIconWarning)
+		}
+	}
 	if loadedID == "" {
-		walk.MsgBox(mw, exportTitle, "Load an event first.", walk.MsgBoxIconWarning)
+		warn("Load an event first.")
 		return
 	}
 	if cfg.TrackID == 0 || cfg.TrackName == "" {
-		walk.MsgBox(mw, exportTitle, "Choose a track first, in the Track list at the top: its name goes in the videos' file names.", walk.MsgBoxIconWarning)
+		warn("Choose a track first, in the Track list at the top: its name goes in the videos' file names.")
 		return
 	}
-	ffmpeg, err := findFFmpeg(cfg.FFmpegPath, tracksideDir)
-	if err != nil {
-		walk.MsgBox(mw, exportTitle,
-			fmt.Sprintf("The videos are cut with a program called ffmpeg, and %v.\n\n"+
-				"To install it, run this in a terminal and then start MCS Uploader again:\n\n    winget install ffmpeg\n\n"+
-				"If you have it somewhere else, put the full path of ffmpeg.exe in mcs.json as \"ffmpeg_path\".", err),
-			walk.MsgBoxIconWarning)
+	ffmpeg, ffmpegErr := findFFmpeg(cfg.FFmpegPath, tracksideDir)
+	if ffmpegErr != nil && !unasked {
+		warn(fmt.Sprintf("The videos are cut with a program called ffmpeg, and %v.\n\n"+
+			"To install it, run this in a terminal and then start MCS Uploader again:\n\n    winget install ffmpeg\n\n"+
+			"If you have it somewhere else, put the full path of ffmpeg.exe in mcs.json as \"ffmpeg_path\".", ffmpegErr))
 		return
 	}
 
@@ -64,6 +92,15 @@ func exportVideoTriggered() {
 		_, readErr := ev.refresh()
 		runs := consecutiveLapTotals(ev, 3)
 		plans := planClips(ev, runs)
+		if recorded := recordedClips(plans); unasked && (recorded == 0 || ffmpegErr != nil) {
+			mw.Synchronize(func() {
+				preparingExport = false
+				if recorded > 0 {
+					logf("Video: %d pilots' laps were recorded, but %v. Export Video says how to set it up.", recorded, ffmpegErr)
+				}
+			})
+			return
+		}
 		records, known := tracksideRecords(tsDir, tsProfile)
 		// Whether the videos can go on the league's YouTube channel as well.
 		offer := checkVideoUpload(api, hasKey, timesUpload, runs)
@@ -74,6 +111,11 @@ func exportVideoTriggered() {
 			preparingExport = false
 			if readErr != nil {
 				logf("Reading the event: %v", readErr)
+			}
+			// Unasked, don't open on top of another of the program's windows
+			// (the settings, say), or for an event loaded in the meantime.
+			if unasked && (!win.IsWindowEnabled(mw.Handle()) || loadedID != id) {
+				return
 			}
 			chooseAndExport(ffmpeg, api, plans, offer, known && !records)
 		})
@@ -89,15 +131,13 @@ func chooseAndExport(ffmpeg string, api mcsAPI, plans []clipPlan, offer videoOff
 		walk.MsgBox(mw, exportTitle, "No pilot has 3 consecutive laps yet, so there are no clips to cut.", walk.MsgBoxIconInformation)
 		return
 	}
-	ready, problems := 0, map[string]int{}
+	problems := map[string]int{}
 	for _, p := range plans {
-		if p.Problem == "" {
-			ready++
-		} else {
+		if p.Problem != "" {
 			problems[p.Problem]++
 		}
 	}
-	if ready == 0 {
+	if recordedClips(plans) == 0 {
 		text := "FPVTrackside isn't set to record races, and there is no recording of these pilots' laps.\n\n" + howToRecord
 		if !notRecording {
 			var lines []string

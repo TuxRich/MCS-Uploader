@@ -608,6 +608,11 @@ func uploadTriggered() {
 			cfg.Uploads[eventID] = id
 			saveCfg()
 			logf("MCS: uploaded %d pilots to track %q (upload %d)", imported, trackName, id)
+			// The videos next, if the laps were recorded: with the times on
+			// MCS they can go on YouTube and against those times.
+			if loadedID == eventID {
+				exportAfterUpload()
+			}
 		})
 	}()
 }

@@ -213,7 +213,7 @@ func TestUploadTicks(t *testing.T) {
 func TestSettingsRoundTrip(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "mcs.json")
 	s := loadSettings(file) // no file yet
-	if s.Uploads == nil || s.api().Base != mcsDefaultBaseURL || s.FlagLapUnder != 9 || !s.VideoTimer || !s.VideoLogo || s.MinHeight != 720 {
+	if s.Uploads == nil || s.api().Base != mcsDefaultBaseURL || s.FlagLapUnder != 9 || !s.VideoTimer || !s.VideoLogo || !s.VideoUpload || s.MinHeight != 720 {
 		t.Fatalf("defaults: %+v", s)
 	}
 	// A settings file from before the lap limit existed gets the default; one
@@ -236,5 +236,17 @@ func TestSettingsRoundTrip(t *testing.T) {
 	got := loadSettings(file)
 	if got.APIKey != "k" || got.TrackID != 4 || !got.ShowBoard || got.Uploads["ev"] != 41 || len(got.Skipped["ev"]) != 1 {
 		t.Errorf("reloaded: %+v", got)
+	}
+	// Putting videos on YouTube is ticked to begin with, also for a file from
+	// before it was; once unticked it stays unticked.
+	if got := loadSettings(old); !got.VideoUpload {
+		t.Errorf("older file: videos not uploaded by default: %+v", got)
+	}
+	s.VideoUpload = false
+	if err := s.save(file); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadSettings(file); got.VideoUpload {
+		t.Errorf("unticking the YouTube upload wasn't kept: %+v", got)
 	}
 }
