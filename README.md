@@ -31,13 +31,13 @@ Things to know:
 
 ### Which version you have
 
-The version is in the window's title (`MCS Uploader v1.1`) and is the first
+The version is in the window's title (`MCS Uploader v1.2`) and is the first
 line of the log. **Help > About MCS Uploader** shows it with where the program
 is finding its settings, FPVTrackside, the events folder and ffmpeg: what to
 send with a question. Ctrl+C copies it. It never shows the API key.
 
 The MCS site is also told the version with everything the program sends it
-(`MCS-Uploader/1.1`), so the site's records show which version uploaded what.
+(`MCS-Uploader/1.2`), so the site's records show which version uploaded what.
 
 ## Building
 
@@ -67,8 +67,13 @@ Windows only. `go test ./...` runs the tests.
 
 1. The first time, the program says the API key hasn't been set up and opens
    the settings (also at **MCS > Settings...**). Paste your API key; the link
-   under it opens the page on the MCS site where you get one. Admin keys also
-   choose the club; race director keys always upload to their own club.
+   under it opens the page on the MCS site where you get one.
+   - As soon as the box holds a whole key, pasted or typed, MCS is asked whose
+     it is and the answer is shown under the box: a race director's, and for
+     which club; an admin's; or a key MCS doesn't know.
+   - A race director's key always uploads for its own club, so there is no
+     club to choose. For an admin's key a **Club to upload for** list appears:
+     the club the upload window starts at.
 2. Choose the track in the **Track** list at the top of the window.
 3. Pick the event and press **Load Event**. The table shows each pilot's best
    3 consecutive laps from any round of the event and updates every 3 seconds
@@ -80,6 +85,12 @@ Windows only. `go test ./...` runs the tests.
      adding a second set, so a pilot unticked the second time is removed.
    - The pilots you untick are remembered for that event and start unticked
      next time.
+   - With an admin's key the window also has a **Club the times are for**
+     list. It starts at the club in the settings; choosing another is for
+     this upload only and leaves the settings alone. An event uploaded again
+     starts at the club it was uploaded for last time. An event has one
+     upload, so uploading it again for another club moves its times to that
+     club; the window says so before you press **Upload**.
    - DVR links are added afterwards on the MCS site; the window has a link to
      that page.
    - Once the times are uploaded, the **Export Video** window (below) opens
@@ -173,7 +184,9 @@ the event's times in among them:
 it. **Refresh MCS times** downloads the board again.
 
 A pilot in the event is matched to an MCS pilot by name (ignoring case) within
-your club, the same way MCS matches names on upload.
+your club, the same way MCS matches names on upload. With an admin's key,
+"your club" is the club the loaded event was last uploaded for, or else the
+one in the settings.
 
 The MCS board is the comparison point, so it is only downloaded when an event
 is loaded or you press Refresh. Once you have uploaded an event, refreshing

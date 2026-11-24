@@ -42,9 +42,10 @@ type settings struct {
 	APIKey       string              `json:"api_key"`
 	TrackID      int64               `json:"track_id"`
 	TrackName    string              `json:"track_name"`
-	ClubID       int64               `json:"club_id,omitempty"` // only needed for admin keys; 0 = key's own club
+	ClubID       int64               `json:"club_id,omitempty"` // an admin key's usual club to upload for; a race director's key has its own
 	ClubName     string              `json:"club_name,omitempty"`
 	Uploads      map[string]int64    `json:"uploads"`                 // event GUID -> MCS upload_id
+	UploadClubs  map[string]mcsClub  `json:"upload_clubs,omitempty"`  // event GUID -> the club an admin key uploaded it for
 	Skipped      map[string][]string `json:"skipped,omitempty"`       // event GUID -> pilots left out of its upload
 	EventsFolder string              `json:"events_folder,omitempty"` // set only when FPVTrackside's own can't be found
 	FlagLapUnder float64             `json:"flag_lap_under"`          // flag laps quicker than this many seconds; 0 = don't
@@ -68,10 +69,31 @@ func loadSettings(file string) settings {
 	if s.Uploads == nil {
 		s.Uploads = map[string]int64{}
 	}
+	if s.UploadClubs == nil {
+		s.UploadClubs = map[string]mcsClub{}
+	}
 	if s.Skipped == nil {
 		s.Skipped = map[string][]string{}
 	}
 	return s
+}
+
+// clubFor is the club an event's pilots fly for on MCS, with ID 0 if that
+// isn't known. who is whose the API key is, if known says MCS has been asked.
+// A race director's key has one club, its own. An admin's key uploads for any
+// club: the one the event was last uploaded for, or else the usual one, chosen
+// in the settings.
+func (s settings) clubFor(eventID string, who mcsMe, known bool) mcsClub {
+	if known && !who.admin() {
+		return mcsClub{who.ClubID, who.Club}
+	}
+	if c := s.UploadClubs[eventID]; c.ID != 0 {
+		return c
+	}
+	if s.ClubID != 0 {
+		return mcsClub{s.ClubID, s.ClubName}
+	}
+	return mcsClub{who.ClubID, who.Club}
 }
 
 func (s settings) save(file string) error {
@@ -237,6 +259,23 @@ func (a mcsAPI) clubs() ([]mcsClub, error) {
 	return body.Clubs, err
 }
 
+// clubChoices is what a list of clubs offers: the clubs MCS lists, plus the
+// chosen one if it isn't among them, as the list may not have been
+// downloaded. It returns the choices and which is the chosen one, -1 if none
+// is.
+func clubChoices(listed []mcsClub, chosen mcsClub) ([]mcsClub, int) {
+	choices := append([]mcsClub(nil), listed...)
+	for i, c := range choices {
+		if c.ID == chosen.ID {
+			return choices, i
+		}
+	}
+	if chosen.ID == 0 {
+		return choices, -1
+	}
+	return append(choices, chosen), len(choices)
+}
+
 // mcsMe is who the API key belongs to.
 type mcsMe struct {
 	Role   string `json:"role"`
@@ -247,10 +286,40 @@ type mcsMe struct {
 	VideoUpload bool `json:"video_upload"`
 }
 
+// admin reports whether the key is an admin's. A race director's key uploads
+// for its own club only; an admin's uploads for any club, and so has to say
+// which each time.
+func (m mcsMe) admin() bool { return m.Role == "admin" }
+
 func (a mcsAPI) me() (mcsMe, error) {
 	var me mcsMe
 	err := a.do("GET", "/me", true, nil, &me)
 	return me, err
+}
+
+// keyShaped reports whether text is as long as an API key from MCS and
+// starts like one ("mcs_" and 32 more characters), so that a key can be
+// checked with MCS as soon as it has been pasted or typed in full.
+func keyShaped(text string) bool {
+	return len(text) == 36 && strings.HasPrefix(text, "mcs_")
+}
+
+// keyStatus says in a line what MCS answered when asked whose a key is.
+func keyStatus(who mcsMe, err error) string {
+	var ae *apiError
+	switch {
+	case err == nil && who.admin():
+		return "An admin's key: it can upload for any club."
+	case err == nil && who.Club != "":
+		return "A race director's key, for " + who.Club + "."
+	case err == nil:
+		return "A race director's key."
+	case errors.As(err, &ae) && ae.Status == http.StatusUnauthorized:
+		return "MCS doesn't know this key."
+	case errors.As(err, &ae) && ae.Status == http.StatusForbidden:
+		return "This key's account can't upload times: only race directors and admins can."
+	}
+	return fmt.Sprintf("The key couldn't be checked with MCS: %v.", err)
 }
 
 // mcsEntry is one pilot's place on a track's MCS leaderboard.

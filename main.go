@@ -10,6 +10,7 @@ import (
 
 	"github.com/lxn/walk"
 	. "github.com/lxn/walk/declarative"
+	"github.com/lxn/win"
 )
 
 const appTitle = "MCS Uploader"
@@ -59,9 +60,10 @@ var (
 	baselineAt time.Time
 	fetching   bool
 
-	meKnown    bool // the API key's club has been looked up
-	myClubID   int64
-	myClubName string
+	meKnown         bool  // MCS has been asked whose the API key is
+	me              mcsMe // its answer: a race director's with their club, or an admin's
+	listedClubs     []mcsClub
+	preparingUpload bool // MCS is being asked about the key or the clubs, before the upload window opens
 
 	listedTracks  []mcsTrack // the tracks MCS lists, as last downloaded
 	offeredTracks []mcsTrack // what the track list in the window offers
@@ -206,13 +208,48 @@ func styleCell(style *walk.CellStyle) {
 // the event's times in it, rather than the event on its own.
 func showingBoard() bool { return cfg.ShowBoard && baselineOK }
 
-// clubForBoard is the club the event's pilots fly for on MCS: the one chosen
-// in the settings (admin keys), else the API key's own.
+// clubForBoard is the club the loaded event's pilots fly for on MCS: see
+// settings.clubFor.
 func clubForBoard() (int64, string) {
-	if cfg.ClubID != 0 {
-		return cfg.ClubID, cfg.ClubName
+	club := cfg.clubFor(loadedID, me, meKnown)
+	return club.ID, club.Name
+}
+
+// gotMe takes MCS's answer about whose the API key is.
+func gotMe(who mcsMe) {
+	if !meKnown || who.Role != me.Role || who.ClubID != me.ClubID {
+		logf("MCS: API key checked. %s", keyStatus(who, nil))
 	}
-	return myClubID, myClubName
+	meKnown, me = true, who
+	// A club chosen for a key that turns out to be a race director's, as the
+	// settings used to allow, would only be in the way.
+	if !who.admin() && cfg.ClubID != 0 {
+		cfg.ClubID, cfg.ClubName = 0, ""
+		saveCfg()
+	}
+}
+
+// checkKey asks MCS whose the API key is, in the background, if that isn't
+// known yet.
+func checkKey() {
+	if meKnown || cfg.APIKey == "" {
+		return
+	}
+	api := cfg.api()
+	go func() {
+		who, err := api.me()
+		mw.Synchronize(func() {
+			if api.Key != cfg.APIKey || meKnown {
+				return // the key has been changed, or asked about elsewhere, meanwhile
+			}
+			if err != nil {
+				logf("API key: %s", keyStatus(who, err))
+				return
+			}
+			gotMe(who)
+			rebuild()
+		})
+	}()
 }
 
 // rebuild redraws the table and status line from what is currently known.
@@ -515,19 +552,19 @@ func fetchBaseline() {
 	api, trackID, trackName := cfg.api(), cfg.TrackID, cfg.TrackName
 	needMe := !meKnown && cfg.APIKey != ""
 	go func() {
-		var me mcsMe
-		var meErr error
+		var who mcsMe
+		var whoErr error
 		if needMe {
-			me, meErr = api.me()
+			who, whoErr = api.me()
 		}
 		board, err := api.leaderboard(trackID)
 		mw.Synchronize(func() {
 			fetching = false
-			if needMe {
-				if meErr != nil {
-					logf("MCS: couldn't check the API key: %v", meErr)
+			if needMe && api.Key == cfg.APIKey && !meKnown {
+				if whoErr != nil {
+					logf("API key: %s", keyStatus(who, whoErr))
 				} else {
-					meKnown, myClubID, myClubName = true, me.ClubID, me.Club
+					gotMe(who)
 				}
 			}
 			if trackID != cfg.TrackID {
@@ -568,30 +605,107 @@ func toggleClubOnly() {
 	rebuild()
 }
 
+const uploadTitle = "Upload to MCS"
+
+// canUpload reports whether there is something to upload and somewhere to
+// upload it to, saying what is missing if not.
+func canUpload() bool {
+	switch {
+	case cfg.APIKey == "":
+		askForAPIKey()
+	case cfg.TrackID == 0:
+		walk.MsgBox(mw, uploadTitle, "Choose a track first, in the Track list at the top.", walk.MsgBoxIconWarning)
+	case loadedID == "":
+		walk.MsgBox(mw, uploadTitle, "Load an event first.", walk.MsgBoxIconWarning)
+	case len(liveRows) == 0:
+		walk.MsgBox(mw, uploadTitle, "No pilot has 3 consecutive laps yet, so there is nothing to upload.", walk.MsgBoxIconInformation)
+	default:
+		return true
+	}
+	return false
+}
+
 // uploadTriggered sends the loaded event's times to MCS, replacing the
 // event's previous upload if there was one.
 func uploadTriggered() {
-	if cfg.APIKey == "" {
-		askForAPIKey()
+	if !canUpload() || preparingUpload {
 		return
 	}
-	if cfg.TrackID == 0 {
-		walk.MsgBox(mw, "Upload to MCS", "Choose a track first, in the Track list at the top.", walk.MsgBoxIconWarning)
+	if meKnown && !me.admin() {
+		confirmAndUpload()
 		return
 	}
-	if loadedID == "" {
-		walk.MsgBox(mw, "Upload to MCS", "Load an event first.", walk.MsgBoxIconWarning)
+	// An admin's key chooses the club in the upload window. So first, whose
+	// the key is, if MCS hasn't said yet, and for an admin's the clubs there
+	// are.
+	preparingUpload = true
+	api, who, known := cfg.api(), me, meKnown
+	if !known {
+		logf("MCS: checking the API key...")
+	}
+	go func() {
+		var err, clubsErr error
+		if !known {
+			who, err = api.me()
+		}
+		var clubs []mcsClub
+		if err == nil && who.admin() {
+			clubs, clubsErr = api.clubs()
+		}
+		mw.Synchronize(func() {
+			preparingUpload = false
+			// Not for a key changed meanwhile, or on top of another of the
+			// program's windows (the settings, say).
+			if api.Key != cfg.APIKey || !win.IsWindowEnabled(mw.Handle()) {
+				return
+			}
+			if err != nil {
+				logf("API key: %s", keyStatus(who, err))
+				walk.MsgBox(mw, uploadTitle, "Nothing has been uploaded: the API key has to be checked with MCS first.\n\n"+
+					keyStatus(who, err)+"\n\nThe key is in MCS > Settings...", walk.MsgBoxIconWarning)
+				return
+			}
+			if !meKnown {
+				gotMe(who)
+			}
+			if clubsErr != nil {
+				logf("MCS: couldn't get the list of clubs: %v", clubsErr)
+			} else if who.admin() {
+				listedClubs = clubs
+			}
+			confirmAndUpload()
+		})
+	}()
+}
+
+// confirmAndUpload shows the upload window and, if it is confirmed, uploads.
+// By now MCS has said whose the API key is.
+func confirmAndUpload() {
+	if !canUpload() {
 		return
 	}
-	if len(liveRows) == 0 {
-		walk.MsgBox(mw, "Upload to MCS", "No pilot has 3 consecutive laps yet, so there is nothing to upload.", walk.MsgBoxIconInformation)
-		return
-	}
-	api, trackID, trackName, clubID := cfg.api(), cfg.TrackID, cfg.TrackName, cfg.ClubID
+	api, trackID, trackName := cfg.api(), cfg.TrackID, cfg.TrackName
 	eventID, previous := loadedID, cfg.Uploads[loadedID]
 
+	// An admin's key says which club the times are for; the window opens
+	// with the event's own (see settings.clubFor).
+	var clubs []mcsClub
+	current := -1
+	if me.admin() {
+		clubs, current = clubChoices(listedClubs, cfg.clubFor(eventID, me, true))
+		if len(clubs) == 0 {
+			walk.MsgBox(mw, uploadTitle, "Nothing has been uploaded: an admin's key has to say which club the times are for, "+
+				"and the list of clubs couldn't be downloaded from MCS. The log has the reason.", walk.MsgBoxIconWarning)
+			return
+		}
+	}
+	var previousClub mcsClub
+	if previous != 0 {
+		previousClub = cfg.UploadClubs[eventID]
+	}
+
 	// What is confirmed is what is sent, even if times change meanwhile.
-	rows, skipped, ok := confirmUpload(liveRows, trackName, previous != 0, cfg.Skipped[eventID])
+	rows, skipped, club, ok := confirmUpload(liveRows, trackName, previous != 0, cfg.Skipped[eventID], clubs, current, previousClub)
 	if !ok {
 		return
 	}
@@ -601,21 +715,31 @@ func uploadTriggered() {
 		cfg.Skipped[eventID] = skipped
 	}
 	saveCfg()
+	where := fmt.Sprintf("%q", trackName)
+	if club.ID != 0 {
+		where += " for " + club.Name
+	}
 	if len(skipped) == 0 {
-		logf("MCS: uploading %d pilots to %q...", len(rows), trackName)
+		logf("MCS: uploading %d pilots to %s...", len(rows), where)
 	} else {
-		logf("MCS: uploading %d pilots to %q, %d left out...", len(rows), trackName, len(skipped))
+		logf("MCS: uploading %d pilots to %s, %d left out...", len(rows), where, len(skipped))
 	}
 	go func() {
-		id, imported, err := api.upload(trackID, clubID, rows, previous)
+		id, imported, err := api.upload(trackID, club.ID, rows, previous)
 		mw.Synchronize(func() {
 			if err != nil {
 				logf("MCS: upload failed: %v", err)
 				return
 			}
 			cfg.Uploads[eventID] = id
+			if club.ID != 0 {
+				cfg.UploadClubs[eventID] = club
+			} else {
+				delete(cfg.UploadClubs, eventID)
+			}
 			saveCfg()
-			logf("MCS: uploaded %d pilots to track %q (upload %d)", imported, trackName, id)
+			logf("MCS: uploaded %d pilots to track %s (upload %d)", imported, where, id)
+			rebuild() // the event's club may have changed, and the board goes by it
 			// The videos next, if the laps were recorded: with the times on
 			// MCS they can go on YouTube and against those times.
 			if loadedID == eventID {
@@ -701,14 +825,35 @@ func (m *uploadModel) ticked() int {
 	return n
 }
 
+// replaceNote is what the upload window says about the event's previous
+// upload, which this one replaces. was is the club that one was for and now
+// the club chosen for this one; either has ID 0 if there is no saying.
+func replaceNote(was, now mcsClub) string {
+	if was.ID != 0 && now.ID != 0 && was.ID != now.ID {
+		return fmt.Sprintf("This replaces the event's previous upload, which was for %s: those times come off MCS, and these go on for %s.", was.Name, now.Name)
+	}
+	return "This replaces the event's previous upload, so a pilot unticked now is removed from it."
+}
+
 // confirmUpload shows the times about to be uploaded, each with a tick box,
 // and asks whether to go ahead. Pilots in skipped, those left out of the
 // event's upload last time, start unticked. It returns the rows to upload and
 // the pilots left out, and whether the upload was confirmed.
-func confirmUpload(rows []mcsRow, trackName string, replacing bool, skipped []string) (upload []mcsRow, nowSkipped []string, ok bool) {
+//
+// An admin's key also chooses the club the times are for, from clubs, with
+// the current one chosen to begin with (-1 for none); previousClub is the one
+// the event's previous upload was for, if that is known. The club chosen is
+// returned. With no clubs there is no choice, and the club returned has ID 0:
+// the key's own.
+func confirmUpload(rows []mcsRow, trackName string, replacing bool, skipped []string, clubs []mcsClub, current int, previousClub mcsClub) (upload []mcsRow, nowSkipped []string, club mcsClub, ok bool) {
 	m := &uploadModel{rows: rows, ticks: uploadTicks(rows, skipped), checks: make([]lapCheck, len(rows))}
 	for i, r := range rows {
 		m.checks[i] = checkLaps(r.Lap1, r.Lap2, r.Lap3, r.BestLap, cfg.FlagLapUnder)
+	}
+	choosesClub := len(clubs) > 0
+	clubNames := make([]string, len(clubs))
+	for i, c := range clubs {
+		clubNames[i] = c.Name
 	}
 	countText := func() string {
 		text := fmt.Sprintf("%d of %d pilots ticked", m.ticked(), len(rows))
@@ -726,26 +871,58 @@ func confirmUpload(rows []mcsRow, trackName string, replacing bool, skipped []st
 	}
 
 	var dlg *walk.Dialog
-	var countLbl *walk.Label
+	var countLbl, clubHintLbl, replaceLbl *walk.Label
+	var clubCB *walk.ComboBox
 	var uploadPB, cancelPB *walk.PushButton
+	// chosen is the club chosen in the window, with ID 0 if none is.
+	chosen := func() mcsClub {
+		if !choosesClub {
+			return mcsClub{}
+		}
+		if i := clubCB.CurrentIndex(); i >= 0 && i < len(clubs) {
+			return clubs[i]
+		}
+		return mcsClub{}
+	}
+	clubHint := func(c mcsClub) string {
+		if c.ID == 0 {
+			return "Choose the club these pilots fly for."
+		}
+		return ""
+	}
 	m.changed = func() {
 		countLbl.SetText(countText())
-		uploadPB.SetEnabled(m.ticked() > 0)
+		uploadPB.SetEnabled(m.ticked() > 0 && (!choosesClub || chosen().ID != 0))
+	}
+	var start mcsClub
+	if choosesClub && current >= 0 && current < len(clubs) {
+		start = clubs[current]
 	}
 
 	intro := fmt.Sprintf("These times will be uploaded to %q. Untick a pilot to leave their time out.", trackName)
 	dvr := fmt.Sprintf(`You can add links to DVR afterwards, on the <a href="%s">DVR page of the MCS site</a>.`, cfg.api().dvrPage())
 
-	cmd, err := Dialog{
+	err := Dialog{
 		AssignTo:      &dlg,
 		Icon:          appIcon,
-		Title:         "Upload to MCS",
+		Title:         uploadTitle,
 		DefaultButton: &uploadPB,
 		CancelButton:  &cancelPB,
 		MinSize:       Size{Width: 890, Height: 560},
 		Layout:        VBox{},
 		Children: []Widget{
 			Label{Text: intro},
+			// Only an admin's key has the choice of club.
+			Composite{
+				Visible: choosesClub,
+				Layout:  HBox{MarginsZero: true},
+				Children: []Widget{
+					Label{Text: "Club the times are for:"},
+					ComboBox{AssignTo: &clubCB, Model: clubNames, CurrentIndex: current, MinSize: Size{Width: 260}},
+					Label{AssignTo: &clubHintLbl, Text: clubHint(start)},
+					HSpacer{},
+				},
+			},
 			TableView{
 				StretchFactor:    10,
 				CheckBoxes:       true,
@@ -763,10 +940,7 @@ func confirmUpload(rows []mcsRow, trackName string, replacing bool, skipped []st
 				},
 			},
 			Label{AssignTo: &countLbl, Text: countText()},
-			Label{
-				Visible: replacing,
-				Text:    "This replaces the event's previous upload, so a pilot unticked now is removed from it.",
-			},
+			Label{AssignTo: &replaceLbl, Visible: replacing, Text: replaceNote(previousClub, start)},
 			Composite{
 				Layout: HBox{MarginsZero: true},
 				Children: []Widget{
@@ -779,27 +953,41 @@ func confirmUpload(rows []mcsRow, trackName string, replacing bool, skipped []st
 				Layout: HBox{MarginsZero: true},
 				Children: []Widget{
 					HSpacer{},
-					PushButton{AssignTo: &uploadPB, Text: "Upload", Enabled: m.ticked() > 0, OnClicked: func() { dlg.Accept() }},
+					PushButton{AssignTo: &uploadPB, Text: "Upload", Enabled: m.ticked() > 0 && (!choosesClub || start.ID != 0), OnClicked: func() {
+						club = chosen()
+						dlg.Accept()
+					}},
 					PushButton{AssignTo: &cancelPB, Text: "Cancel", OnClicked: func() { dlg.Cancel() }},
 				},
 			},
 		},
-	}.Run(mw)
+	}.Create(mw)
 	if err != nil {
 		logf("Upload confirmation failed: %v", err)
-		return nil, nil, false
+		return nil, nil, mcsClub{}, false
 	}
-	if cmd != walk.DlgCmdOK {
-		return nil, nil, false
+	// Attached once the window is all there, as the first choice is made
+	// while it is being put together.
+	clubCB.CurrentIndexChanged().Attach(func() {
+		clubHintLbl.SetText(clubHint(chosen()))
+		replaceLbl.SetText(replaceNote(previousClub, chosen()))
+		m.changed()
+	})
+	if dlg.Run() != walk.DlgCmdOK {
+		return nil, nil, mcsClub{}, false
 	}
 	upload, nowSkipped = tickedRows(m.rows, m.ticks)
-	return upload, nowSkipped, len(upload) > 0
+	return upload, nowSkipped, club, len(upload) > 0 && (!choosesClub || club.ID != 0)
 }
 
 // showSettings opens a dialog to set the MCS API key and pick the track
 // results are uploaded to. The track and club lists come from the public MCS
-// API. The club only matters for admin keys; race-director keys always upload
-// to their own club.
+// API.
+//
+// The club is only an admin key's to choose: a race director's key always
+// uploads for its own club. So the choice of club is hidden until MCS has
+// said the key in the box is an admin's, which it is asked in the background
+// whenever the box holds a whole key.
 func showSettings() {
 	api := cfg.api()
 	listed, tracksErr := api.tracks()
@@ -817,18 +1005,22 @@ func showSettings() {
 	}
 	keyLink := fmt.Sprintf(`<a href="%s">Get your API key from the MCS site</a>`, api.apiKeyPage())
 
-	clubs, _ := api.clubs()
-	clubNames := []string{"(key's own club)"}
-	currentClub := 0
+	// The clubs are only wanted if the key is an admin's, but the list is
+	// short and anyone's to read, so it is there by the time MCS has said.
+	if list, err := api.clubs(); err != nil {
+		logf("MCS: couldn't get the list of clubs: %v", err)
+	} else {
+		listedClubs = list
+	}
+	clubs, currentClub := clubChoices(listedClubs, mcsClub{cfg.ClubID, cfg.ClubName})
+	clubNames := make([]string, len(clubs))
 	for i, c := range clubs {
-		clubNames = append(clubNames, c.Name)
-		if c.ID == cfg.ClubID {
-			currentClub = i + 1
-		}
+		clubNames[i] = c.Name
 	}
 
 	var dlg *walk.Dialog
 	var keyLE *walk.LineEdit
+	var keyLbl, clubLbl *walk.Label
 	var trackCB, clubCB *walk.ComboBox
 	var limitNE *walk.NumberEdit
 	var okPB, cancelPB *walk.PushButton
@@ -838,7 +1030,7 @@ func showSettings() {
 	newTrackIdx := -1
 	newClubIdx := currentClub
 
-	cmd, err := Dialog{
+	err := Dialog{
 		AssignTo:      &dlg,
 		Icon:          appIcon,
 		Title:         "MCS Settings",
@@ -850,13 +1042,16 @@ func showSettings() {
 			Label{Text: "API key:"},
 			LineEdit{AssignTo: &keyLE, Text: cfg.APIKey, PasswordMode: true},
 			Label{},
+			// What MCS says about the key in the box.
+			Label{AssignTo: &keyLbl},
+			Label{},
 			// A link label sizes itself for its maximum width, so it needs one
 			// wide enough for the text or it takes the height of a wrapped one.
 			LinkLabel{Text: keyLink, MaxSize: Size{Width: 320}, OnLinkActivated: func(link *walk.LinkLabelLink) { openInBrowser(link.URL()) }},
 			Label{Text: trackHint},
 			ComboBox{AssignTo: &trackCB, Model: names, CurrentIndex: current},
-			Label{Text: "Club (admin keys only):"},
-			ComboBox{AssignTo: &clubCB, Model: clubNames, CurrentIndex: currentClub},
+			Label{AssignTo: &clubLbl, Text: "Club to upload for:", Visible: false},
+			ComboBox{AssignTo: &clubCB, Model: clubNames, CurrentIndex: currentClub, Visible: false},
 			Label{Text: "Flag laps quicker than (0 = off):"},
 			NumberEdit{AssignTo: &limitNE, Value: cfg.FlagLapUnder, Decimals: 1, MinValue: 0, MaxValue: 600, Suffix: " seconds"},
 			Composite{
@@ -875,11 +1070,76 @@ func showSettings() {
 				},
 			},
 		},
-	}.Run(mw)
+	}.Create(mw)
 	if err != nil {
 		logf("MCS settings dialog failed: %v", err)
 		return
 	}
+
+	// asked is the key MCS was last asked about, and answer what it said, nil
+	// while that isn't known: still being asked, or the key isn't one of its.
+	var asked string
+	var answer *mcsMe
+	closed := false
+	show := func(status string, admin bool) {
+		keyLbl.SetText(status)
+		clubLbl.SetVisible(admin)
+		clubCB.SetVisible(admin)
+	}
+	key := func() string { return strings.TrimSpace(keyLE.Text()) }
+	ask := func() {
+		k := key()
+		if closed || k == asked {
+			return
+		}
+		asked, answer = k, nil
+		if k == "" {
+			show("", false)
+			return
+		}
+		show("Checking the key with MCS...", false)
+		go func() {
+			who, err := mcsAPI{Base: api.Base, Key: k}.me()
+			mw.Synchronize(func() {
+				if closed || asked != k {
+					return // the window has gone, or the box holds something else now
+				}
+				if err == nil {
+					answer = &who
+				}
+				show(keyStatus(who, err), err == nil && who.admin())
+			})
+		}()
+	}
+	switch {
+	case cfg.APIKey == "":
+	case meKnown:
+		// Already asked about, since the program started.
+		who := me
+		asked, answer = cfg.APIKey, &who
+		show(keyStatus(who, nil), who.admin())
+	default:
+		ask()
+	}
+	// A whole key in the box, as after a paste, is asked about at once.
+	// Anything else is asked about when the box is left, in case keys are one
+	// day a different length.
+	keyLE.TextChanged().Attach(func() {
+		switch k := key(); {
+		case k == asked:
+		case keyShaped(k):
+			ask()
+		default:
+			// What MCS said was about a different key.
+			asked, answer = "", nil
+			show("", false)
+		}
+	})
+	keyLE.EditingFinished().Attach(ask)
+	dlg.Closing().Attach(func(*bool, walk.CloseReason) { closed = true })
+
+	cmd := dlg.Run()
+	closed = true
 	if cmd != walk.DlgCmdOK {
 		return
 	}
@@ -888,16 +1148,23 @@ func showSettings() {
 	cfg.FlagLapUnder = newLimit
 	if newKey != cfg.APIKey {
 		cfg.APIKey = newKey
-		meKnown, myClubID, myClubName = false, 0, ""
+		meKnown, me = false, mcsMe{}
 	}
 	if newTrackIdx >= 0 && newTrackIdx < len(tracks) {
 		cfg.TrackID = tracks[newTrackIdx].ID
 		cfg.TrackName = tracks[newTrackIdx].Name
 	}
-	if newClubIdx == 0 {
-		cfg.ClubID, cfg.ClubName = 0, ""
-	} else if newClubIdx > 0 && newClubIdx-1 < len(clubs) {
-		cfg.ClubID, cfg.ClubName = clubs[newClubIdx-1].ID, clubs[newClubIdx-1].Name
+	// The club was there to choose if MCS said the key is an admin's. For a
+	// race director's key there is none to choose (gotMe sees to that), and
+	// if MCS hasn't said, the choice is left as it was.
+	if answer != nil && asked == newKey {
+		gotMe(*answer)
+		if answer.admin() {
+			cfg.ClubID, cfg.ClubName = 0, ""
+			if newClubIdx >= 0 && newClubIdx < len(clubs) {
+				cfg.ClubID, cfg.ClubName = clubs[newClubIdx].ID, clubs[newClubIdx].Name
+			}
+		}
 	}
 	saveCfg()
 	logf("MCS: settings saved (track: %s)", cfg.TrackName)
@@ -908,6 +1175,8 @@ func showSettings() {
 	showTracks()
 	if cfg.ShowBoard && cfg.TrackID != 0 && (!baselineOK || !meKnown) {
 		fetchBaseline()
+	} else {
+		checkKey()
 	}
 	rebuild()
 }
@@ -1029,6 +1298,7 @@ func main() {
 		askForAPIKey() // its settings page fetches the track list
 	} else {
 		loadTracks()
+		checkKey() // whose it is: an admin's chooses the club it uploads for
 	}
 	mw.Run()
 }
