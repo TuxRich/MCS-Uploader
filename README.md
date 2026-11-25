@@ -31,13 +31,13 @@ Things to know:
 
 ### Which version you have
 
-The version is in the window's title (`MCS Uploader v1.2`) and is the first
+The version is in the window's title (`MCS Uploader v1.3`) and is the first
 line of the log. **Help > About MCS Uploader** shows it with where the program
 is finding its settings, FPVTrackside, the events folder and ffmpeg: what to
 send with a question. Ctrl+C copies it. It never shows the API key.
 
 The MCS site is also told the version with everything the program sends it
-(`MCS-Uploader/1.2`), so the site's records show which version uploaded what.
+(`MCS-Uploader/1.3`), so the site's records show which version uploaded what.
 
 ## Building
 
@@ -81,22 +81,71 @@ Windows only. `go test ./...` runs the tests.
 4. **Upload to MCS** lists the pilots and times about to be sent, each with a
    tick box. Untick a pilot to leave their time out, then press **Upload**.
    Nothing is sent until then, and nothing is uploaded automatically.
-   - Uploading the same event again replaces its previous upload rather than
-     adding a second set, so a pilot unticked the second time is removed.
-   - The pilots you untick are remembered for that event and start unticked
-     next time.
+   - Uploading the same event again sends only what has changed since: see
+     [Uploading an event again](#uploading-an-event-again).
+   - A pilot left unticked, whose time was therefore not sent, is remembered
+     for that event and starts unticked next time.
    - With an admin's key the window also has a **Club the times are for**
      list. It starts at the club in the settings; choosing another is for
      this upload only and leaves the settings alone. An event uploaded again
-     starts at the club it was uploaded for last time. An event has one
-     upload, so uploading it again for another club moves its times to that
-     club; the window says so before you press **Upload**.
+     starts at the club its times are on MCS for.
    - DVR links are added afterwards on the MCS site; the window has a link to
      that page.
    - Once the times are uploaded, the **Export Video** window (below) opens
      by itself if FPVTrackside recorded any of these pilots' laps, so the
      videos can follow the times. Press **Cancel** in it if you don't want
      them. It doesn't open if there is no recording to export.
+
+### Uploading an event again
+
+An event that is already on MCS isn't sent a second time. When you press
+**Upload to MCS** the program first asks MCS which of the event's times it
+has, and then sends only the differences, one pilot at a time:
+
+- a time that has changed is changed on MCS where it is, so what has been
+  added to it on the site since, a DVR link say, stays;
+- a pilot who is new to the event is added;
+- a time MCS already has just as it is, is left alone: nothing is sent for it.
+
+MCS announces an upload on Discord, and it used to announce the whole event
+each time it was uploaded again. Now it announces only the pilots added. A
+time that is changed is not announced.
+
+The window shows what will happen before anything is sent:
+
+- The **On MCS** column has the time MCS has for each pilot: grey when it is
+  the same as the event's, blue when it differs, and **New** for a pilot MCS
+  has no time for.
+- The line under the list adds it up: `16 of 16 pilots ticked: 1 to change,
+  15 already the same on MCS`.
+
+Things to know:
+
+- **An unticked pilot's time on MCS is left as it is.** Unticking doesn't
+  remove a time. To send one corrected time you can leave everyone ticked,
+  as nothing is sent for the others; if you do untick them, their times stay.
+- **A pilot who no longer has 3 consecutive laps**, after a race or a lap was
+  made invalid in FPVTrackside say, is listed after the others with the time
+  MCS has, and the **Check** column says *No 3 laps now: this time will be
+  removed from MCS*. Ticked, the time comes off MCS. Unticked, it stays, and
+  the note says so.
+- That is the only way a time comes off MCS from here. To remove a time the
+  event still has, use the MCS site.
+- A pilot whose unticking kept something back (a time not added, not changed
+  or not removed) starts unticked next time. Unticking a pilot whose time on
+  MCS is already right keeps nothing back, so it isn't remembered.
+- A changed time keeps its DVR link, though the video is of the laps as they
+  were. MCS marks it as not checked again. To put a new video up, clear the
+  link on the MCS DVR page first: **Export Video** leaves a pilot who has a
+  video alone.
+- Pilots added to an event later show on the MCS site as an upload of their
+  own, beside the event's first.
+- **Another track or club.** If the track chosen, or with an admin's key the
+  club, is not the one MCS has the event's times for, uploading moves them:
+  the event's times there are all deleted, and the ticked pilots' times sent
+  as a new upload, which MCS announces. The window says so before you press
+  **Upload**.
+- If MCS can't be asked what it has of the event, nothing is uploaded.
 
 ### Export video
 

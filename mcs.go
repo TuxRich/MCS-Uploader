@@ -45,8 +45,9 @@ type settings struct {
 	ClubID       int64               `json:"club_id,omitempty"` // an admin key's usual club to upload for; a race director's key has its own
 	ClubName     string              `json:"club_name,omitempty"`
 	Uploads      map[string]int64    `json:"uploads"`                 // event GUID -> MCS upload_id
+	MoreUploads  map[string][]int64  `json:"more_uploads,omitempty"`  // event GUID -> its later uploads: see uploadIDs
 	UploadClubs  map[string]mcsClub  `json:"upload_clubs,omitempty"`  // event GUID -> the club an admin key uploaded it for
-	Skipped      map[string][]string `json:"skipped,omitempty"`       // event GUID -> pilots left out of its upload
+	Skipped      map[string][]string `json:"skipped,omitempty"`       // event GUID -> pilots held back from its upload
 	EventsFolder string              `json:"events_folder,omitempty"` // set only when FPVTrackside's own can't be found
 	FlagLapUnder float64             `json:"flag_lap_under"`          // flag laps quicker than this many seconds; 0 = don't
 	ShowBoard    bool                `json:"show_leaderboard"`
@@ -68,6 +69,9 @@ func loadSettings(file string) settings {
 	}
 	if s.Uploads == nil {
 		s.Uploads = map[string]int64{}
+	}
+	if s.MoreUploads == nil {
+		s.MoreUploads = map[string][]int64{}
 	}
 	if s.UploadClubs == nil {
 		s.UploadClubs = map[string]mcsClub{}
@@ -94,6 +98,31 @@ func (s settings) clubFor(eventID string, who mcsMe, known bool) mcsClub {
 		return mcsClub{s.ClubID, s.ClubName}
 	}
 	return mcsClub{who.ClubID, who.Club}
+}
+
+// uploadIDs are an event's uploads on MCS: its first, and one more for each
+// time pilots have been added to it since. Uploading an event again changes
+// the times MCS has rather than sending them all afresh, but MCS can't add a
+// time to an upload it already has, so the times of pilots new to the event go
+// up as an upload of their own.
+func (s settings) uploadIDs(eventID string) []int64 {
+	var ids []int64
+	if id := s.Uploads[eventID]; id != 0 {
+		ids = append(ids, id)
+	}
+	return append(ids, s.MoreUploads[eventID]...)
+}
+
+// setUploadIDs records which uploads on MCS are an event's.
+func (s settings) setUploadIDs(eventID string, ids []int64) {
+	delete(s.Uploads, eventID)
+	delete(s.MoreUploads, eventID)
+	if len(ids) > 0 {
+		s.Uploads[eventID] = ids[0]
+	}
+	if len(ids) > 1 {
+		s.MoreUploads[eventID] = append([]int64(nil), ids[1:]...)
+	}
 }
 
 func (s settings) save(file string) error {
@@ -219,33 +248,6 @@ func (a mcsAPI) apiKeyPage() string { return a.Base + "/account/password" }
 // dvrPage is where a race director adds DVR links to uploaded times.
 func (a mcsAPI) dvrPage() string { return a.Base + "/director/dvr" }
 
-// uploadTicks says which rows start ticked when an upload is confirmed: all
-// but those of the pilots left out of the event's upload last time.
-func uploadTicks(rows []mcsRow, skipped []string) []bool {
-	out := map[string]bool{}
-	for _, name := range skipped {
-		out[nameKey(name)] = true
-	}
-	ticks := make([]bool, len(rows))
-	for i, r := range rows {
-		ticks[i] = !out[nameKey(r.Pilot)]
-	}
-	return ticks
-}
-
-// tickedRows splits rows into those to upload and the names of the pilots
-// left out.
-func tickedRows(rows []mcsRow, ticks []bool) (upload []mcsRow, skipped []string) {
-	for i, r := range rows {
-		if ticks[i] {
-			upload = append(upload, r)
-		} else {
-			skipped = append(skipped, r.Pilot)
-		}
-	}
-	return upload, skipped
-}
-
 type mcsClub struct {
 	ID   int64  `json:"id"`
 	Name string `json:"name"`
@@ -342,35 +344,4 @@ func (a mcsAPI) leaderboard(trackID int64) ([]mcsEntry, error) {
 	}
 	err := a.do("GET", fmt.Sprintf("/tracks/%d/leaderboard", trackID), false, nil, &body)
 	return body.Leaderboard, err
-}
-
-// upload sends an event's results to a track. MCS keeps every upload it is
-// sent, so an event's previous upload (previous, 0 if none) is deleted first:
-// uploading again then updates the event's results rather than stacking a
-// second set. It returns the new upload's id and how many rows MCS took.
-func (a mcsAPI) upload(trackID, clubID int64, rows []mcsRow, previous int64) (uploadID int64, imported int, err error) {
-	if previous != 0 {
-		err := a.do("DELETE", fmt.Sprintf("/my/uploads/%d", previous), true, nil, nil)
-		var ae *apiError
-		// Already gone (removed on the site, say) is as good as deleted.
-		if err != nil && !(errors.As(err, &ae) && ae.Status == http.StatusNotFound) {
-			return 0, 0, fmt.Errorf("could not remove previous upload %d: %w", previous, err)
-		}
-	}
-	payload := struct {
-		TrackID int64    `json:"track_id"`
-		ClubID  int64    `json:"club_id,omitempty"` // admin keys only
-		Rows    []mcsRow `json:"rows"`
-	}{trackID, clubID, rows}
-	var resp struct {
-		UploadID int64 `json:"upload_id"`
-		Imported int   `json:"imported"`
-	}
-	if err := a.do("POST", "/results", true, payload, &resp); err != nil {
-		return 0, 0, err
-	}
-	if resp.UploadID == 0 {
-		return 0, 0, errors.New("MCS didn't return an upload id")
-	}
-	return resp.UploadID, resp.Imported, nil
 }

@@ -223,22 +223,22 @@ func TestCheckVideoUpload(t *testing.T) {
 	f, api := newFakeVideoSite(t)
 	runs := []lapRun{{Name: "Alice", Total: 40.58}, {Name: "Bob", Total: 41.282}}
 
-	offer := checkVideoUpload(api, true, 9, runs)
+	offer := checkVideoUpload(api, true, []int64{9}, runs)
 	if !offer.Available || len(offer.Matches) != 2 || offer.Matches[0].ResultID != 36 || offer.Matches[1].Why == "" {
 		t.Errorf("with everything in place: %+v", offer)
 	}
 
 	for why, check := range map[string]func() videoOffer{
-		"API key":           func() videoOffer { return checkVideoUpload(api, false, 9, runs) },
-		"Upload this event": func() videoOffer { return checkVideoUpload(api, true, 0, runs) },
-		"no longer on MCS":  func() videoOffer { return checkVideoUpload(api, true, 404, runs) },
+		"API key":           func() videoOffer { return checkVideoUpload(api, false, []int64{9}, runs) },
+		"Upload this event": func() videoOffer { return checkVideoUpload(api, true, nil, runs) },
+		"no longer on MCS":  func() videoOffer { return checkVideoUpload(api, true, []int64{404}, runs) },
 		"no YouTube channel": func() videoOffer {
 			f.videoUpload = false
 			defer func() { f.videoUpload = true }()
-			return checkVideoUpload(api, true, 9, runs)
+			return checkVideoUpload(api, true, []int64{9}, runs)
 		},
 		"couldn't be asked": func() videoOffer {
-			return checkVideoUpload(settings{BaseURL: "http://127.0.0.1:1", APIKey: "k"}.api(), true, 9, runs)
+			return checkVideoUpload(settings{BaseURL: "http://127.0.0.1:1", APIKey: "k"}.api(), true, []int64{9}, runs)
 		},
 	} {
 		if offer := check(); offer.Available || !strings.Contains(offer.Why, why) {

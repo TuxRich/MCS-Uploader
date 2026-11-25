@@ -29,23 +29,6 @@ import (
 // as long as the connection needs; the context it is given can stop it.
 var videoClient = &http.Client{}
 
-// mcsResult is one time of an upload, as MCS has it.
-type mcsResult struct {
-	ID       int64   `json:"id"`
-	Pilot    string  `json:"pilot"`
-	Seconds  float64 `json:"seconds"`
-	VideoURL string  `json:"video_url"`
-}
-
-// uploadResults lists the times in one of the club's uploads.
-func (a mcsAPI) uploadResults(uploadID int64) ([]mcsResult, error) {
-	var body struct {
-		Results []mcsResult `json:"results"`
-	}
-	err := a.do("GET", fmt.Sprintf("/my/uploads/%d", uploadID), true, nil, &body)
-	return body.Results, err
-}
-
 // videoStart is the site's answer to starting a video upload.
 type videoStart struct {
 	UploadID    string `json:"upload_id"`
@@ -180,9 +163,9 @@ type videoOffer struct {
 }
 
 // checkVideoUpload works out whether an event's videos can be uploaded
-// through MCS. hasKey is whether an API key is set, and uploadID the event's
-// upload of times on MCS, 0 if it has none.
-func checkVideoUpload(api mcsAPI, hasKey bool, uploadID int64, runs []lapRun) videoOffer {
+// through MCS. hasKey is whether an API key is set, and uploadIDs the event's
+// uploads of times on MCS, none if it hasn't been uploaded.
+func checkVideoUpload(api mcsAPI, hasKey bool, uploadIDs []int64, runs []lapRun) videoOffer {
 	if !hasKey {
 		return videoOffer{Why: "Set your MCS API key first (MCS > Settings...)."}
 	}
@@ -193,18 +176,17 @@ func checkVideoUpload(api mcsAPI, hasKey bool, uploadID int64, runs []lapRun) vi
 	if !me.VideoUpload {
 		return videoOffer{Why: "The MCS site has no YouTube channel connected for this."}
 	}
-	if uploadID == 0 {
+	if len(uploadIDs) == 0 {
 		return videoOffer{Why: "Upload this event's times to MCS first, so each video has a time to go against."}
 	}
-	results, err := api.uploadResults(uploadID)
+	on, err := api.eventOnMCS(uploadIDs)
 	if err != nil {
-		var ae *apiError
-		if errors.As(err, &ae) && ae.Status == http.StatusNotFound {
-			return videoOffer{Why: "This event's times are no longer on MCS: upload them again first."}
-		}
 		return videoOffer{Why: fmt.Sprintf("MCS couldn't be asked: %v.", err)}
 	}
-	return videoOffer{Available: true, Matches: matchVideos(runs, results)}
+	if len(on.IDs) == 0 {
+		return videoOffer{Why: "This event's times are no longer on MCS: upload them again first."}
+	}
+	return videoOffer{Available: true, Matches: matchVideos(runs, on.Results)}
 }
 
 // videoMatch says, for one pilot's exported video, which of the club's times

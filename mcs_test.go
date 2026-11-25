@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +20,9 @@ type fakeMCS struct {
 	posted       map[string]any
 	deleteStatus int
 	postStatus   int
+	uploads      map[string]string         // id -> what GET /my/uploads/{id} answers
+	patched      map[string]map[string]any // a time's id -> the change it was sent
+	resultStatus map[string]int            // a time's id -> the answer to changing or removing it, if not 200
 }
 
 func (f *fakeMCS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -26,6 +30,38 @@ func (f *fakeMCS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.keys = append(f.keys, r.Header.Get("X-API-Key"))
 	w.Header().Set("Content-Type", "application/json")
 	switch {
+	case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/api/v1/my/uploads/"):
+		id := strings.TrimPrefix(r.URL.Path, "/api/v1/my/uploads/")
+		switch answer, ok := f.uploads[id]; {
+		case ok:
+			io.WriteString(w, answer)
+		case id == "403":
+			w.WriteHeader(403)
+			io.WriteString(w, `{"error":"upload belongs to another club"}`)
+		default:
+			w.WriteHeader(404)
+			io.WriteString(w, `{"error":"upload not found"}`)
+		}
+	case (r.Method == "PATCH" || r.Method == "DELETE") && strings.HasPrefix(r.URL.Path, "/api/v1/my/results/"):
+		id := strings.TrimPrefix(r.URL.Path, "/api/v1/my/results/")
+		if r.Method == "PATCH" {
+			var change map[string]any
+			body, _ := io.ReadAll(r.Body)
+			if err := json.Unmarshal(body, &change); err != nil {
+				f.t.Errorf("bad JSON in a change: %v", err)
+			}
+			f.patched[id] = change
+		}
+		switch status := f.resultStatus[id]; status {
+		case 0, 200:
+			io.WriteString(w, `{"id":`+id+`}`)
+		case 404:
+			w.WriteHeader(404)
+			io.WriteString(w, `{"error":"result not found"}`)
+		default:
+			w.WriteHeader(status)
+			io.WriteString(w, `{"error":"result belongs to another club"}`)
+		}
 	case r.Method == "DELETE" && strings.HasPrefix(r.URL.Path, "/api/v1/my/uploads/"):
 		w.WriteHeader(f.deleteStatus)
 		if f.deleteStatus == 200 {
@@ -43,7 +79,8 @@ func (f *fakeMCS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		w.WriteHeader(f.postStatus)
 		if f.postStatus == 201 {
-			io.WriteString(w, `{"upload_id":41,"imported":2,"track_id":4,"club_id":2}`)
+			rows, _ := f.posted["rows"].([]any)
+			fmt.Fprintf(w, `{"upload_id":41,"imported":%d,"track_id":4,"club_id":2}`, len(rows))
 		} else {
 			io.WriteString(w, `{"error":"unknown track_id"}`)
 		}
@@ -76,7 +113,8 @@ func (f *fakeMCS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func newFake(t *testing.T) (*fakeMCS, mcsAPI) {
-	f := &fakeMCS{t: t, deleteStatus: 200, postStatus: 201}
+	f := &fakeMCS{t: t, deleteStatus: 200, postStatus: 201,
+		uploads: map[string]string{}, patched: map[string]map[string]any{}, resultStatus: map[string]int{}}
 	srv := httptest.NewServer(f)
 	t.Cleanup(srv.Close)
 	return f, settings{BaseURL: srv.URL + "/", APIKey: "mcs_test"}.api()
@@ -85,78 +123,6 @@ func newFake(t *testing.T) (*fakeMCS, mcsAPI) {
 var testRows = []mcsRow{
 	{Pilot: "Alice", Time: 61.5, Lap1: 20, Lap2: 20.5, Lap3: 21, BestLap: 20, Lap1Sectors: []float64{8, 12}},
 	{Pilot: "Bob", Time: 70},
-}
-
-func TestUploadReplacesPrevious(t *testing.T) {
-	f, api := newFake(t)
-	id, imported, err := api.upload(4, 0, testRows, 7)
-	if err != nil || id != 41 || imported != 2 {
-		t.Fatalf("upload: id=%d imported=%d err=%v", id, imported, err)
-	}
-	if got := strings.Join(f.calls, ", "); got != "DELETE /api/v1/my/uploads/7, POST /api/v1/results" {
-		t.Errorf("calls: %s", got)
-	}
-	for _, k := range f.keys {
-		if k != "mcs_test" {
-			t.Errorf("API key sent as %q", k)
-		}
-	}
-	if f.posted["track_id"] != 4.0 {
-		t.Errorf("track_id: %v", f.posted["track_id"])
-	}
-	if _, has := f.posted["club_id"]; has {
-		t.Error("club_id sent though it is 0 (the key's own club)")
-	}
-	rows := f.posted["rows"].([]any)
-	alice, bob := rows[0].(map[string]any), rows[1].(map[string]any)
-	if alice["pilot"] != "Alice" || alice["time"] != 61.5 || alice["lap3"] != 21.0 || alice["best_lap"] != 20.0 || len(alice["lap1_sectors"].([]any)) != 2 {
-		t.Errorf("Alice's row: %v", alice)
-	}
-	if len(bob) != 2 {
-		t.Errorf("Bob's row should be just pilot and time: %v", bob)
-	}
-}
-
-func TestUploadFirstTimeAndAdminClub(t *testing.T) {
-	f, api := newFake(t)
-	if _, _, err := api.upload(4, 2, testRows, 0); err != nil {
-		t.Fatal(err)
-	}
-	if len(f.calls) != 1 || f.calls[0] != "POST /api/v1/results" {
-		t.Errorf("calls: %v", f.calls)
-	}
-	if f.posted["club_id"] != 2.0 {
-		t.Errorf("club_id: %v", f.posted["club_id"])
-	}
-}
-
-func TestUploadPreviousAlreadyGone(t *testing.T) {
-	f, api := newFake(t)
-	f.deleteStatus = 404
-	if id, _, err := api.upload(4, 0, testRows, 7); err != nil || id != 41 {
-		t.Errorf("a previous upload that is already gone shouldn't stop the upload: id=%d err=%v", id, err)
-	}
-}
-
-func TestUploadStopsIfPreviousCantBeRemoved(t *testing.T) {
-	f, api := newFake(t)
-	f.deleteStatus = 403
-	_, _, err := api.upload(4, 0, testRows, 7)
-	if err == nil || !strings.Contains(err.Error(), "belongs to another club") {
-		t.Errorf("err: %v", err)
-	}
-	if len(f.calls) != 1 {
-		t.Errorf("posted anyway: %v", f.calls)
-	}
-}
-
-func TestUploadError(t *testing.T) {
-	f, api := newFake(t)
-	f.postStatus = 400
-	_, _, err := api.upload(4, 0, testRows, 0)
-	if err == nil || err.Error() != "unknown track_id (400)" {
-		t.Errorf("err: %v", err)
-	}
 }
 
 func TestReads(t *testing.T) {
@@ -201,23 +167,6 @@ func TestTrackChoices(t *testing.T) {
 	}
 	if got := (settings{}).api().apiKeyPage(); got != "https://mcs.fpv-events.com/account/password" {
 		t.Errorf("API key page: %s", got)
-	}
-}
-
-func TestUploadTicks(t *testing.T) {
-	rows := []mcsRow{{Pilot: "Alice", Time: 60}, {Pilot: "Bob", Time: 61}, {Pilot: "Cara", Time: 62}}
-	// Bob was left out last time; Dave, also left out, isn't in the event now.
-	ticks := uploadTicks(rows, []string{" bob", "Dave"})
-	if len(ticks) != 3 || !ticks[0] || ticks[1] || !ticks[2] {
-		t.Fatalf("ticks: %v", ticks)
-	}
-	ticks[2] = false // Cara unticked too
-	upload, skipped := tickedRows(rows, ticks)
-	if len(upload) != 1 || upload[0].Pilot != "Alice" || len(skipped) != 2 || skipped[0] != "Bob" || skipped[1] != "Cara" {
-		t.Errorf("upload %v, skipped %v", upload, skipped)
-	}
-	if all := uploadTicks(rows, nil); !all[0] || !all[1] || !all[2] {
-		t.Errorf("nothing left out before, so all ticked: %v", all)
 	}
 	if got := (settings{}).api().dvrPage(); got != "https://mcs.fpv-events.com/director/dvr" {
 		t.Errorf("DVR page: %s", got)
@@ -366,21 +315,6 @@ func TestClubFor(t *testing.T) {
 	}
 	if got := (settings{}).clubFor("ev", mcsMe{}, false); got.ID != 0 {
 		t.Errorf("nothing known: %+v", got)
-	}
-}
-
-func TestReplaceNote(t *testing.T) {
-	mine, other := mcsClub{2, "Mine"}, mcsClub{9, "Other"}
-	const plain = "This replaces the event's previous upload, so a pilot unticked now is removed from it."
-	for _, c := range []struct{ was, now mcsClub }{{mine, mine}, {mcsClub{}, mine}, {mine, mcsClub{}}, {mcsClub{}, mcsClub{}}} {
-		if got := replaceNote(c.was, c.now); got != plain {
-			t.Errorf("%+v: %q", c, got)
-		}
-	}
-	// Uploading an event again for another club moves its times.
-	got := replaceNote(mine, other)
-	if !strings.Contains(got, "which was for Mine") || !strings.Contains(got, "go on for Other") {
-		t.Errorf("another club: %q", got)
 	}
 }
 

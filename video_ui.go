@@ -85,7 +85,7 @@ func openExport(unasked bool) {
 	preparingExport = true
 	dir, id, name := eventsDir, loadedID, loadedName
 	tsDir, tsProfile := tracksideDir, tracksideProfile
-	api, hasKey, timesUpload := cfg.api(), cfg.APIKey != "", cfg.Uploads[loadedID]
+	api, hasKey, timesUploads := cfg.api(), cfg.APIKey != "", cfg.uploadIDs(loadedID)
 	go func() {
 		// Its own reading of the event, so as not to share the live one.
 		ev := newEventData(dir, id, name)
@@ -103,7 +103,7 @@ func openExport(unasked bool) {
 		}
 		records, known := tracksideRecords(tsDir, tsProfile)
 		// Whether the videos can go on the league's YouTube channel as well.
-		offer := checkVideoUpload(api, hasKey, timesUpload, runs)
+		offer := checkVideoUpload(api, hasKey, timesUploads, runs)
 		for i := range offer.Matches {
 			plans[i].MCS = offer.Matches[i]
 		}

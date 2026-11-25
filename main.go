@@ -163,7 +163,8 @@ var (
 	upText   = walk.RGB(0, 135, 0)
 	dnText   = walk.RGB(190, 40, 40)
 	newText  = walk.RGB(0, 90, 200)
-	flagText = walk.RGB(205, 85, 0) // laps that look wrong
+	flagText = walk.RGB(205, 85, 0)    // laps that look wrong
+	sameText = walk.RGB(140, 140, 140) // in the upload window: a time MCS has already
 )
 
 func styleCell(style *walk.CellStyle) {
@@ -617,7 +618,8 @@ func canUpload() bool {
 		walk.MsgBox(mw, uploadTitle, "Choose a track first, in the Track list at the top.", walk.MsgBoxIconWarning)
 	case loadedID == "":
 		walk.MsgBox(mw, uploadTitle, "Load an event first.", walk.MsgBoxIconWarning)
-	case len(liveRows) == 0:
+	case len(liveRows) == 0 && len(cfg.uploadIDs(loadedID)) == 0:
+		// (An event uploaded before may have times on MCS to take off it.)
 		walk.MsgBox(mw, uploadTitle, "No pilot has 3 consecutive laps yet, so there is nothing to upload.", walk.MsgBoxIconInformation)
 	default:
 		return true
@@ -625,38 +627,43 @@ func canUpload() bool {
 	return false
 }
 
-// uploadTriggered sends the loaded event's times to MCS, replacing the
-// event's previous upload if there was one.
+// uploadTriggered is Upload to MCS being pressed. Before the upload window
+// opens, MCS is asked in the background for whatever isn't known yet: whose
+// the API key is; for an admin's key, the clubs there are to choose from; and,
+// for an event that has been uploaded before, what MCS has of it, as uploading
+// it again goes by that (see upload.go).
 func uploadTriggered() {
 	if !canUpload() || preparingUpload {
 		return
 	}
-	if meKnown && !me.admin() {
-		confirmAndUpload()
+	api, who, known := cfg.api(), me, meKnown
+	eventID, ids := loadedID, cfg.uploadIDs(loadedID)
+	if known && !who.admin() && len(ids) == 0 {
+		confirmAndUpload(onMCS{})
 		return
 	}
-	// An admin's key chooses the club in the upload window. So first, whose
-	// the key is, if MCS hasn't said yet, and for an admin's the clubs there
-	// are.
 	preparingUpload = true
-	api, who, known := cfg.api(), me, meKnown
 	if !known {
 		logf("MCS: checking the API key...")
 	}
 	go func() {
-		var err, clubsErr error
+		var err, clubsErr, onErr error
 		if !known {
 			who, err = api.me()
 		}
 		var clubs []mcsClub
-		if err == nil && who.admin() {
-			clubs, clubsErr = api.clubs()
+		var on onMCS
+		if err == nil {
+			if who.admin() {
+				clubs, clubsErr = api.clubs()
+			}
+			on, onErr = api.eventOnMCS(ids)
 		}
 		mw.Synchronize(func() {
 			preparingUpload = false
-			// Not for a key changed meanwhile, or on top of another of the
-			// program's windows (the settings, say).
-			if api.Key != cfg.APIKey || !win.IsWindowEnabled(mw.Handle()) {
+			// Not for a key changed or another event loaded meanwhile, or on
+			// top of another of the program's windows (the settings, say).
+			if api.Key != cfg.APIKey || loadedID != eventID || !win.IsWindowEnabled(mw.Handle()) {
 				return
 			}
 			if err != nil {
@@ -673,42 +680,86 @@ func uploadTriggered() {
 			} else if who.admin() {
 				listedClubs = clubs
 			}
-			confirmAndUpload()
+			if onErr != nil {
+				logf("MCS: couldn't read this event's times on MCS: %v", onErr)
+				walk.MsgBox(mw, uploadTitle, "Nothing has been uploaded: this event has been uploaded before, and uploading it again goes by "+
+					"the times MCS has of it, which couldn't be read.\n\n"+onErr.Error(), walk.MsgBoxIconWarning)
+				return
+			}
+			confirmAndUpload(on)
 		})
 	}()
 }
 
+// clubNamed is a club with its name, as far as that is known here: from the
+// club the event is recorded as uploaded for, the key's own, or MCS's list.
+func clubNamed(id int64, eventID string) mcsClub {
+	club := mcsClub{ID: id}
+	switch {
+	case id == 0:
+		return club
+	case cfg.UploadClubs[eventID].ID == id:
+		club.Name = cfg.UploadClubs[eventID].Name
+	case me.ClubID == id:
+		club.Name = me.Club
+	default:
+		for _, c := range listedClubs {
+			if c.ID == id {
+				club.Name = c.Name
+			}
+		}
+	}
+	if club.Name == "" {
+		club.Name = fmt.Sprintf("club %d", id)
+	}
+	return club
+}
+
 // confirmAndUpload shows the upload window and, if it is confirmed, uploads.
-// By now MCS has said whose the API key is.
-func confirmAndUpload() {
+// By now MCS has said whose the API key is, and what it has of the event (on)
+// if the event has been uploaded before.
+func confirmAndUpload(on onMCS) {
 	if !canUpload() {
 		return
 	}
 	api, trackID, trackName := cfg.api(), cfg.TrackID, cfg.TrackName
-	eventID, previous := loadedID, cfg.Uploads[loadedID]
+	eventID := loadedID
+	uploaded := len(on.IDs) > 0
+	if len(liveRows) == 0 && (len(on.Results) == 0 || on.elsewhere(trackID, 0)) {
+		walk.MsgBox(mw, uploadTitle, "No pilot has 3 consecutive laps now, so there is nothing to upload.", walk.MsgBoxIconInformation)
+		return
+	}
+	// The club MCS has the event's times for.
+	var was mcsClub
+	if uploaded {
+		was = clubNamed(on.ClubID, eventID)
+	}
 
-	// An admin's key says which club the times are for; the window opens
-	// with the event's own (see settings.clubFor).
+	// An admin's key says which club the times are for. The window opens with
+	// the club the event's times are on MCS for, or else the event's own (see
+	// settings.clubFor).
 	var clubs []mcsClub
 	current := -1
 	if me.admin() {
-		clubs, current = clubChoices(listedClubs, cfg.clubFor(eventID, me, true))
+		start := cfg.clubFor(eventID, me, true)
+		if was.ID != 0 {
+			start = was
+		}
+		clubs, current = clubChoices(listedClubs, start)
 		if len(clubs) == 0 {
 			walk.MsgBox(mw, uploadTitle, "Nothing has been uploaded: an admin's key has to say which club the times are for, "+
 				"and the list of clubs couldn't be downloaded from MCS. The log has the reason.", walk.MsgBoxIconWarning)
 			return
 		}
 	}
-	var previousClub mcsClub
-	if previous != 0 {
-		previousClub = cfg.UploadClubs[eventID]
-	}
 
 	// What is confirmed is what is sent, even if times change meanwhile.
-	rows, skipped, club, ok := confirmUpload(liveRows, trackName, previous != 0, cfg.Skipped[eventID], clubs, current, previousClub)
+	lines, ticks, club, moving, ok := confirmUpload(liveRows, on, trackID, trackName, cfg.Skipped[eventID], clubs, current, was)
 	if !ok {
 		return
 	}
+	plan := planUpload(lines, ticks)
+	skipped := heldBack(lines, ticks)
 	if len(skipped) == 0 {
 		delete(cfg.Skipped, eventID)
 	} else {
@@ -719,67 +770,141 @@ func confirmAndUpload() {
 	if club.ID != 0 {
 		where += " for " + club.Name
 	}
-	if len(skipped) == 0 {
-		logf("MCS: uploading %d pilots to %s...", len(rows), where)
-	} else {
-		logf("MCS: uploading %d pilots to %s, %d left out...", len(rows), where, len(skipped))
+
+	// done is the upload over, well or badly.
+	done := func(sent uploadSent, err error) {
+		if err != nil {
+			logf("MCS: upload failed: %v", err)
+			if !moving && sent != (uploadSent{}) {
+				logf("MCS: before that, %s. Upload again to finish: what is done already won't be sent twice.", sent)
+			}
+			return
+		}
+		// Which uploads on MCS are the event's now.
+		var ids []int64
+		if !moving {
+			ids = append(ids, on.IDs...)
+		}
+		if sent.NewUpload != 0 {
+			ids = append(ids, sent.NewUpload)
+		}
+		cfg.setUploadIDs(eventID, ids)
+		if club.ID != 0 {
+			cfg.UploadClubs[eventID] = club
+		} else {
+			delete(cfg.UploadClubs, eventID)
+		}
+		saveCfg()
+		switch {
+		case moving || !uploaded:
+			logf("MCS: uploaded %d pilots to track %s (upload %d)", sent.Added, where, sent.NewUpload)
+		case !plan.empty():
+			logf("MCS: track %s is up to date: %s", where, sent)
+		}
+		rebuild() // the event's club may have changed, and the board goes by it
+		// The videos next, if the laps were recorded: with the times on MCS
+		// they can go on YouTube and against those times.
+		if loadedID == eventID {
+			exportAfterUpload()
+		}
+	}
+
+	left := ""
+	if len(skipped) > 0 {
+		left = fmt.Sprintf(", %d left out", len(skipped))
+	}
+	switch {
+	case moving:
+		logf("MCS: moving this event's times: uploading %d pilots to %s%s...", len(plan.Add), where, left)
+	case !uploaded:
+		logf("MCS: uploading %d pilots to %s%s...", len(plan.Add), where, left)
+	case plan.empty():
+		logf("MCS: nothing to send: the ticked pilots' times are on MCS already, at %s", where)
+		done(uploadSent{}, nil)
+		return
+	default:
+		logf("MCS: bringing %s up to date: %s...", where, plan)
 	}
 	go func() {
-		id, imported, err := api.upload(trackID, club.ID, rows, previous)
-		mw.Synchronize(func() {
-			if err != nil {
-				logf("MCS: upload failed: %v", err)
-				return
-			}
-			cfg.Uploads[eventID] = id
-			if club.ID != 0 {
-				cfg.UploadClubs[eventID] = club
-			} else {
-				delete(cfg.UploadClubs, eventID)
-			}
-			saveCfg()
-			logf("MCS: uploaded %d pilots to track %s (upload %d)", imported, where, id)
-			rebuild() // the event's club may have changed, and the board goes by it
-			// The videos next, if the laps were recorded: with the times on
-			// MCS they can go on YouTube and against those times.
-			if loadedID == eventID {
-				exportAfterUpload()
-			}
-		})
+		var sent uploadSent
+		var err error
+		if moving {
+			sent.NewUpload, sent.Added, err = api.moveUploads(on.IDs, trackID, club.ID, plan.Add)
+		} else {
+			sent, err = api.send(trackID, club.ID, plan)
+		}
+		mw.Synchronize(func() { done(sent, err) })
 	}()
 }
 
-// uploadModel is the list of times in the upload confirmation, each with a
+// The upload window's columns.
+const (
+	upPilot = iota
+	upTime
+	upLap1
+	upLap2
+	upLap3
+	upBestLap
+	upOnMCS
+	upCheck
+)
+
+// uploadModel is the list of pilots in the upload confirmation, each with a
 // tick box.
 type uploadModel struct {
 	walk.TableModelBase
-	rows    []mcsRow
+	lines   []uploadLine
 	ticks   []bool
-	checks  []lapCheck // what looks wrong about each row's laps
+	checks  []lapCheck // what looks wrong about each line's laps
 	changed func()
 }
 
-func (m *uploadModel) RowCount() int { return len(m.rows) }
+// show sets the lines listed. A pilot listed before keeps their tick; the
+// others start ticked unless they are among skipped, the pilots held back
+// from the event's upload last time (see heldBack).
+func (m *uploadModel) show(lines []uploadLine, skipped []string) {
+	before := map[string]bool{}
+	for i, l := range m.lines {
+		before[nameKey(l.Row.Pilot)] = m.ticks[i]
+	}
+	ticks := uploadTicks(lines, skipped)
+	checks := make([]lapCheck, len(lines))
+	for i, l := range lines {
+		if tick, listed := before[nameKey(l.Row.Pilot)]; listed {
+			ticks[i] = tick
+		}
+		checks[i] = checkLaps(l.Row.Lap1, l.Row.Lap2, l.Row.Lap3, l.Row.BestLap, cfg.FlagLapUnder)
+	}
+	m.lines, m.ticks, m.checks = lines, ticks, checks
+	m.PublishRowsReset()
+}
+
+func (m *uploadModel) RowCount() int { return len(m.lines) }
 
 func (m *uploadModel) Value(row, col int) interface{} {
-	if row < 0 || row >= len(m.rows) {
+	if row < 0 || row >= len(m.lines) {
 		return ""
 	}
-	r := m.rows[row]
+	l := m.lines[row]
 	switch col {
-	case 0:
-		return r.Pilot
-	case 1:
-		return secs(r.Time)
-	case 2:
-		return secs(r.Lap1)
-	case 3:
-		return secs(r.Lap2)
-	case 4:
-		return secs(r.Lap3)
-	case 5:
-		return secs(r.BestLap)
-	case 6:
+	case upPilot:
+		return l.Row.Pilot
+	case upTime:
+		return secs(l.Row.Time)
+	case upLap1:
+		return secs(l.Row.Lap1)
+	case upLap2:
+		return secs(l.Row.Lap2)
+	case upLap3:
+		return secs(l.Row.Lap3)
+	case upBestLap:
+		return secs(l.Row.BestLap)
+	case upOnMCS:
+		return l.onMCSText()
+	case upCheck:
+		if l.does() == doesRemove {
+			return removalNote(m.ticks[row])
+		}
 		return m.checks[row].String()
 	}
 	return ""
@@ -792,21 +917,34 @@ func (m *uploadModel) styleCell(style *walk.CellStyle) {
 	}
 	c := m.checks[row]
 	switch col := style.Col(); col {
-	case 2, 3, 4:
-		if c.Lap(col - 1) {
+	case upLap1, upLap2, upLap3:
+		if c.Lap(col - upLap1 + 1) {
 			style.TextColor = flagText
 		}
-	case 5:
+	case upBestLap:
 		if c.BestUnder {
 			style.TextColor = flagText
 		}
-	case 6:
+	case upOnMCS:
+		// What ticking the pilot does to MCS's time stands out; a time that
+		// is there already, as it is, stands back.
+		switch m.lines[row].does() {
+		case doesAdd, doesChange:
+			style.TextColor = newText
+		case doesRemove:
+			style.TextColor = flagText
+		default:
+			style.TextColor = sameText
+		}
+	case upCheck:
 		style.TextColor = flagText
 	}
 }
 
 func (m *uploadModel) Checked(row int) bool { return m.ticks[row] }
 
+// SetChecked is a tick box being ticked or unticked. The table draws the row
+// again afterwards, which is how a note that goes by the tick keeps up.
 func (m *uploadModel) SetChecked(row int, checked bool) error {
 	m.ticks[row] = checked
 	if m.changed != nil {
@@ -825,53 +963,50 @@ func (m *uploadModel) ticked() int {
 	return n
 }
 
-// replaceNote is what the upload window says about the event's previous
-// upload, which this one replaces. was is the club that one was for and now
-// the club chosen for this one; either has ID 0 if there is no saying.
-func replaceNote(was, now mcsClub) string {
-	if was.ID != 0 && now.ID != 0 && was.ID != now.ID {
-		return fmt.Sprintf("This replaces the event's previous upload, which was for %s: those times come off MCS, and these go on for %s.", was.Name, now.Name)
-	}
-	return "This replaces the event's previous upload, so a pilot unticked now is removed from it."
-}
-
-// confirmUpload shows the times about to be uploaded, each with a tick box,
-// and asks whether to go ahead. Pilots in skipped, those left out of the
-// event's upload last time, start unticked. It returns the rows to upload and
-// the pilots left out, and whether the upload was confirmed.
+// confirmUpload shows the pilots and times about to be uploaded, each with a
+// tick box, and asks whether to go ahead. Pilots in skipped, those held back
+// from the event's upload last time (see heldBack), start unticked.
+//
+// on is what MCS has of the event already, if it has been uploaded before.
+// The window then lists, beside each pilot's time, the time MCS has, and
+// after the event's pilots those MCS has a time for who have none in the
+// event now: see uploadLines. That is unless the upload is a move, to
+// another track or club than MCS has the event's times for: those are then
+// replaced altogether, and the window lists the event's times alone.
 //
 // An admin's key also chooses the club the times are for, from clubs, with
-// the current one chosen to begin with (-1 for none); previousClub is the one
-// the event's previous upload was for, if that is known. The club chosen is
-// returned. With no clubs there is no choice, and the club returned has ID 0:
-// the key's own.
-func confirmUpload(rows []mcsRow, trackName string, replacing bool, skipped []string, clubs []mcsClub, current int, previousClub mcsClub) (upload []mcsRow, nowSkipped []string, club mcsClub, ok bool) {
-	m := &uploadModel{rows: rows, ticks: uploadTicks(rows, skipped), checks: make([]lapCheck, len(rows))}
-	for i, r := range rows {
-		m.checks[i] = checkLaps(r.Lap1, r.Lap2, r.Lap3, r.BestLap, cfg.FlagLapUnder)
+// the current one chosen to begin with (-1 for none); was is the club MCS has
+// the event's times for. With no clubs there is no choice, and the club
+// returned has ID 0: the key's own.
+//
+// It returns the lines as they were listed, which of them were ticked, the
+// club, whether the upload is a move, and whether it was confirmed.
+func confirmUpload(rows []mcsRow, on onMCS, trackID int64, trackName string, skipped []string, clubs []mcsClub, current int, was mcsClub) (lines []uploadLine, ticks []bool, club mcsClub, moving, ok bool) {
+	uploaded := len(on.IDs) > 0
+	otherTrack := on.elsewhere(trackID, 0)
+	inPlace, afresh := uploadLines(rows, on.Results), uploadLines(rows, nil)
+	// linesFor is what the window lists when the times are for club c.
+	linesFor := func(c mcsClub) []uploadLine {
+		if on.elsewhere(trackID, c.ID) {
+			return afresh
+		}
+		return inPlace
 	}
 	choosesClub := len(clubs) > 0
 	clubNames := make([]string, len(clubs))
 	for i, c := range clubs {
 		clubNames[i] = c.Name
 	}
-	countText := func() string {
-		text := fmt.Sprintf("%d of %d pilots ticked", m.ticked(), len(rows))
-		// Only the ticked ones matter: they are what will be uploaded.
-		toCheck := 0
-		for i, c := range m.checks {
-			if m.ticks[i] && c.Flagged() {
-				toCheck++
-			}
-		}
-		if toCheck > 0 {
-			text += fmt.Sprintf(", %d of them with laps to check (see the Check column)", toCheck)
-		}
-		return text
+	var start mcsClub
+	if choosesClub && current >= 0 && current < len(clubs) {
+		start = clubs[current]
 	}
+	m := &uploadModel{}
+	m.show(linesFor(start), skipped)
 
 	var dlg *walk.Dialog
-	var countLbl, clubHintLbl, replaceLbl *walk.Label
+	var tv *walk.TableView
+	var countLbl, clubHintLbl, noteLbl *walk.Label
 	var clubCB *walk.ComboBox
 	var uploadPB, cancelPB *walk.PushButton
 	// chosen is the club chosen in the window, with ID 0 if none is.
@@ -890,16 +1025,15 @@ func confirmUpload(rows []mcsRow, trackName string, replacing bool, skipped []st
 		}
 		return ""
 	}
+	countText := func(c mcsClub) string {
+		return uploadSummary(m.lines, m.ticks, m.checks, uploaded && !on.elsewhere(trackID, c.ID))
+	}
 	m.changed = func() {
-		countLbl.SetText(countText())
+		countLbl.SetText(countText(chosen()))
 		uploadPB.SetEnabled(m.ticked() > 0 && (!choosesClub || chosen().ID != 0))
 	}
-	var start mcsClub
-	if choosesClub && current >= 0 && current < len(clubs) {
-		start = clubs[current]
-	}
 
-	intro := fmt.Sprintf("These times will be uploaded to %q. Untick a pilot to leave their time out.", trackName)
+	intro := fmt.Sprintf("These are the event's times, for upload to %q. Untick a pilot to leave their time out.", trackName)
 	dvr := fmt.Sprintf(`You can add links to DVR afterwards, on the <a href="%s">DVR page of the MCS site</a>.`, cfg.api().dvrPage())
 
 	err := Dialog{
@@ -908,7 +1042,7 @@ func confirmUpload(rows []mcsRow, trackName string, replacing bool, skipped []st
 		Title:         uploadTitle,
 		DefaultButton: &uploadPB,
 		CancelButton:  &cancelPB,
-		MinSize:       Size{Width: 890, Height: 560},
+		MinSize:       Size{Width: 1020, Height: 560},
 		Layout:        VBox{},
 		Children: []Widget{
 			Label{Text: intro},
@@ -924,6 +1058,7 @@ func confirmUpload(rows []mcsRow, trackName string, replacing bool, skipped []st
 				},
 			},
 			TableView{
+				AssignTo:         &tv,
 				StretchFactor:    10,
 				CheckBoxes:       true,
 				ColumnsOrderable: false,
@@ -936,11 +1071,13 @@ func confirmUpload(rows []mcsRow, trackName string, replacing bool, skipped []st
 					{Title: "Lap 2", Width: 60, Alignment: AlignFar},
 					{Title: "Lap 3", Width: 60, Alignment: AlignFar},
 					{Title: "Best lap", Width: 65, Alignment: AlignFar},
-					{Title: "Check", Width: 300},
+					// The time MCS has, when the upload goes by that.
+					{Title: "On MCS", Width: 115, Alignment: AlignFar, Hidden: !uploaded || on.elsewhere(trackID, start.ID)},
+					{Title: "Check", Width: 330},
 				},
 			},
-			Label{AssignTo: &countLbl, Text: countText()},
-			Label{AssignTo: &replaceLbl, Visible: replacing, Text: replaceNote(previousClub, start)},
+			Label{AssignTo: &countLbl, Text: countText(start)},
+			Label{AssignTo: &noteLbl, Visible: uploaded, Text: uploadNote(otherTrack, was, start)},
 			Composite{
 				Layout: HBox{MarginsZero: true},
 				Children: []Widget{
@@ -964,20 +1101,25 @@ func confirmUpload(rows []mcsRow, trackName string, replacing bool, skipped []st
 	}.Create(mw)
 	if err != nil {
 		logf("Upload confirmation failed: %v", err)
-		return nil, nil, mcsClub{}, false
+		return nil, nil, mcsClub{}, false, false
 	}
 	// Attached once the window is all there, as the first choice is made
 	// while it is being put together.
 	clubCB.CurrentIndexChanged().Attach(func() {
-		clubHintLbl.SetText(clubHint(chosen()))
-		replaceLbl.SetText(replaceNote(previousClub, chosen()))
+		c := chosen()
+		clubHintLbl.SetText(clubHint(c))
+		noteLbl.SetText(uploadNote(otherTrack, was, c))
+		// Another club than MCS has the event's times for makes it a move,
+		// and the list a different one.
+		m.show(linesFor(c), skipped)
+		tv.Columns().At(upOnMCS).SetVisible(uploaded && !on.elsewhere(trackID, c.ID))
+		tv.Invalidate()
 		m.changed()
 	})
 	if dlg.Run() != walk.DlgCmdOK {
-		return nil, nil, mcsClub{}, false
+		return nil, nil, mcsClub{}, false, false
 	}
-	upload, nowSkipped = tickedRows(m.rows, m.ticks)
-	return upload, nowSkipped, club, len(upload) > 0 && (!choosesClub || club.ID != 0)
+	return m.lines, m.ticks, club, on.elsewhere(trackID, club.ID), m.ticked() > 0 && (!choosesClub || club.ID != 0)
 }
 
 // showSettings opens a dialog to set the MCS API key and pick the track
